@@ -1,0 +1,33 @@
+download_solar_data.py
+
+python download_solar_data .py \
+--start-date 2014-10-15 \
+--end-date 2014-10-31 \
+--data-types hmi,aia,goes \
+--wavelengths 94,131,171,193,211,304,335,1600 \
+--cadence 1h \
+--visualize
+
+python3 10_1_to_11_31_2003/download_solar_data.py \
+  --start-date 2017-09-01 \
+  --end-date 2017-09-21 \
+  --data-types hmi,aia,goes,soho,noaa_ar \
+  --wavelengths 94,131,171,193,211,304,335,1600 \
+  --soho-instruments c2,c3 \
+  --cadence 6h \
+  --max-files 30 \
+  --max-storage 140 \
+  --incremental \
+  --step-days 5 \
+  --visualize
+
+
+SDO_GOES_preprocessing.py
+
+plot.py
+
+magnetogram_feature_Extraction.py
+
+basic.py
+
+visualize_solar_flare.py
