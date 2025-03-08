@@ -3,7 +3,7 @@ import numpy as np
 from sklearn.metrics import roc_curve, auc
 from sklearn.preprocessing import label_binarize
 import matplotlib.pyplot as plt
-from complete_model import SolarFlarePredictor, SolarDataGenerator  # Adjust import path as needed
+from train_solar_flare_model import SolarFlarePredictor, SolarDataGenerator  # Adjust import path as needed
 
 
 def load_test_data(config):

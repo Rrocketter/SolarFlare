@@ -1,0 +1,10 @@
+tensorflow
+tensorflow-probability
+tensorflow-addons
+numpy
+pandas
+scikit-learn
+bayesian-optimization
+matplotlib
+astropy
+sunpy

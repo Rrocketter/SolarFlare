@@ -18,6 +18,8 @@ from collections import defaultdict
 import logging
 import traceback
 from io import StringIO
+from typing import List
+
 
 tfd = tfp.distributions
 tfpl = tfp.layers
@@ -1102,8 +1104,14 @@ class EnhancedSolarEvaluator:
             'mce': mce
         }
 
-    def analyze_lead_time_accuracy(self, test_data, time_bins=[0, 6, 12, 24, 48]):
+    def analyze_lead_time_accuracy(self, test_data, time_bins: List[int] = None):
         """Analyze accuracy vs forecast lead time"""
+        if time_bins is None:
+            time_bins = [0, 6, 12, 24, 48]
+        elif isinstance(time_bins, int):
+            # Handle case where a single int is accidentally passed
+            time_bins = [time_bins]
+
         # Get predictions and ground truth
         predictions = self.model.predict_with_uncertainty(test_data)
         sequences = test_data.sequences
@@ -1215,7 +1223,8 @@ class EnhancedSolarExplainability:
         for x in interpolated_inputs:
             with tf.GradientTape() as tape:
                 tape.watch(x)
-                preds = self.model(x)
+                # preds = self.model(x)
+                preds = self.model.full_model(x)
                 target = preds[target_class_idx][:, target_class_idx]
             grad = tape.gradient(target, x)
             gradients.append(grad.numpy())
@@ -1237,12 +1246,14 @@ class EnhancedSolarExplainability:
         for _ in range(max_iter):
             with tf.GradientTape() as tape:
                 # Get prediction for perturbed input
-                preds = self.model(perturbed_input)
+                # preds = self.model(perturbed_input)
+                preds = self.model.full_model(perturbed_input)
                 current_prob = preds[0][0, target_class]
 
                 # Loss components
                 classification_loss = 1 - current_prob  # Maximize target class probability
-                similarity_loss = tf.reduce_mean(tf.square(perturbed_input - original_input))
+                # similarity_loss = tf.reduce_mean(tf.square(perturbed_input - original_input))
+                similarity_loss = tf.reduce_mean(tf.square(tf.math.subtract(perturbed_input, original_input)))
                 total_loss = classification_loss + lambda_reg * similarity_loss
 
             # Compute gradients
@@ -1252,11 +1263,13 @@ class EnhancedSolarExplainability:
             # Project to valid input range
             perturbed_input.assign(tf.clip_by_value(perturbed_input, 0.0, 1.0))
 
-        return perturbed_input.numpy()
+        # return perturbed_input.numpy()
+        return tf.identity(perturbed_input).numpy()
 
     def compute_feature_ablation(self, inputs, target_class_idx, feature_mask):
         """Compute feature importance through systematic ablation"""
-        original_pred = self.model(inputs)[0][0, target_class_idx]
+        # original_pred = self.model(inputs)[0][0, target_class_idx]
+        original_pred = self.model.full_model(inputs)[0][0, target_class_idx]
 
         # Ablate features according to mask
         ablated_inputs = inputs * feature_mask
@@ -1269,6 +1282,8 @@ class EnhancedSolarExplainability:
 def train_and_evaluate_model(config=None):
     """Main function to train and evaluate the model"""
     logger.info("Starting training pipeline")
+    print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))  # <-- HERE
+    logger.info(f"GPUs detected: {len(tf.config.list_physical_devices('GPU'))}")
 
     try:
 
