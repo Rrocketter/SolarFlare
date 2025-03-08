@@ -1,6 +1,6 @@
-Here's the markdown code for an instructions file to run the solar flare prediction model:
 
-```markdown
+
+
 # Solar Flare Prediction Model - Setup and Execution Guide
 
 ## Prerequisites
