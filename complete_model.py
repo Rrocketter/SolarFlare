@@ -1,6 +1,7 @@
 import tensorflow as tf
 from tensorflow.keras import layers, Model, regularizers
 import tensorflow_probability as tfp
+import tensorflow_addons as tfa
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedKFold
@@ -11,16 +12,28 @@ from sklearn.model_selection import train_test_split
 from sklearn.calibration import calibration_curve
 from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import brier_score_loss
-from tqdm import tqdm
-import cv2
 import os
+import gc
+from collections import defaultdict
+import logging
+import traceback
+from io import StringIO
 
 tfd = tfp.distributions
 tfpl = tfp.layers
 
+logging.basicConfig(
+    filename='logs.txt',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    filemode='w'  # Use 'a' to append instead of overwrite
+)
+logger = logging.getLogger(__name__)
+
 
 class SolarFlarePredictor:
     def __init__(self, config=None):
+        logger.info("Initializing SolarFlarePredictor")
         self.config = {
             # Data parameters
             'magnetogram_shape': (1024, 1024, 1),  # HMI magnetogram dimensions
@@ -347,133 +360,143 @@ class SolarFlarePredictor:
 
     def build_full_model(self):
         """Build the complete hybrid architecture"""
-        # Input layers
-        magnetogram_inputs = layers.Input(
-            shape=(self.config['sequence_length'],) + self.config['magnetogram_shape'],
-            name='magnetogram_sequence'
-        )
-
-        aia_inputs = {
-            wavelength: layers.Input(
-                shape=(self.config['sequence_length'],) + self.config['aia_shape'],
-                name=f'aia_{wavelength}_sequence'
+        logger.info("Building full model architecture")
+        try:
+            # Input layers
+            magnetogram_inputs = layers.Input(
+                shape=(self.config['sequence_length'],) + self.config['magnetogram_shape'],
+                name='magnetogram_sequence'
             )
-            for wavelength in self.config['aia_wavelengths']
-        }
 
-        # Feature extraction for each time step
-        magnetogram_features = []
-        aia_wavelength_features = {wave: [] for wave in self.config['aia_wavelengths']}
+            aia_inputs = {
+                wavelength: layers.Input(
+                    shape=(self.config['sequence_length'],) + self.config['aia_shape'],
+                    name=f'aia_{wavelength}_sequence'
+                )
+                for wavelength in self.config['aia_wavelengths']
+            }
 
-        mag_encoder = self.build_magnetogram_encoder()
+            # Feature extraction for each time step
+            magnetogram_features = []
+            aia_wavelength_features = {wave: [] for wave in self.config['aia_wavelengths']}
 
-        # Process each time step
-        for t in range(self.config['sequence_length']):
-            # Extract magnetogram features
+            mag_encoder = self.build_magnetogram_encoder()
 
-            mag_features = mag_encoder(magnetogram_inputs[:, t])
-            magnetogram_features.append(mag_features)
+            # Process each time step
+            for t in range(self.config['sequence_length']):
+                # Extract magnetogram features
 
-            # Extract AIA features for each wavelength
+                mag_features = mag_encoder(magnetogram_inputs[:, t])
+                magnetogram_features.append(mag_features)
+
+                # Extract AIA features for each wavelength
+                for wavelength in self.config['aia_wavelengths']:
+                    wave_encoder = self.build_aia_wavelength_encoder(wavelength)
+                    wave_features = wave_encoder(aia_inputs[wavelength][:, t])
+                    aia_wavelength_features[wavelength].append(wave_features)
+
+            # Convert lists to tensors
+            magnetogram_sequence = layers.Lambda(lambda x: tf.stack(x, axis=1))(magnetogram_features)
+
+            aia_sequence_by_wavelength = {}
             for wavelength in self.config['aia_wavelengths']:
-                wave_encoder = self.build_aia_wavelength_encoder(wavelength)
-                wave_features = wave_encoder(aia_inputs[wavelength][:, t])
-                aia_wavelength_features[wavelength].append(wave_features)
+                aia_sequence_by_wavelength[wavelength] = layers.Lambda(
+                    lambda x: tf.stack(x, axis=1)
+                )(aia_wavelength_features[wavelength])
 
-        # Convert lists to tensors
-        magnetogram_sequence = layers.Lambda(lambda x: tf.stack(x, axis=1))(magnetogram_features)
+            # Process each wavelength sequence with temporal encoder
+            temporal_encoder = self.build_temporal_transformer()
+            magnetogram_temporal = temporal_encoder(magnetogram_sequence)
 
-        aia_sequence_by_wavelength = {}
-        for wavelength in self.config['aia_wavelengths']:
-            aia_sequence_by_wavelength[wavelength] = layers.Lambda(
-                lambda x: tf.stack(x, axis=1)
-            )(aia_wavelength_features[wavelength])
+            aia_temporal_features = []
+            for wavelength in self.config['aia_wavelengths']:
+                aia_temp = temporal_encoder(aia_sequence_by_wavelength[wavelength])
+                aia_temporal_features.append(aia_temp)
 
-        # Process each wavelength sequence with temporal encoder
-        temporal_encoder = self.build_temporal_transformer()
-        magnetogram_temporal = temporal_encoder(magnetogram_sequence)
+            # Cross-wavelength attention
+            aia_combined = self.build_cross_wavelength_attention(aia_temporal_features)
 
-        aia_temporal_features = []
-        for wavelength in self.config['aia_wavelengths']:
-            aia_temp = temporal_encoder(aia_sequence_by_wavelength[wavelength])
-            aia_temporal_features.append(aia_temp)
+            # Combine all features
+            combined_features = layers.Concatenate()([magnetogram_temporal, aia_combined])
 
-        # Cross-wavelength attention
-        aia_combined = self.build_cross_wavelength_attention(aia_temporal_features)
+            # High-level feature extraction
+            x = layers.Dense(512, activation='relu')(combined_features)
+            x = layers.Dropout(self.config['dropout_rate'])(x)
+            x = layers.Dense(256, activation='relu')(x)
+            x = layers.Dropout(self.config['dropout_rate'])(x)
 
-        # Combine all features
-        combined_features = layers.Concatenate()([magnetogram_temporal, aia_combined])
+            # Task-specific heads with uncertainty quantification
 
-        # High-level feature extraction
-        x = layers.Dense(512, activation='relu')(combined_features)
-        x = layers.Dropout(self.config['dropout_rate'])(x)
-        x = layers.Dense(256, activation='relu')(x)
-        x = layers.Dropout(self.config['dropout_rate'])(x)
+            # 1. Flare classification (B, C, M, X, None)
+            flare_class_logits = layers.Dense(5, name='flare_class_logits')(x)
+            flare_class_output = layers.Softmax(name='flare_class')(flare_class_logits)
 
-        # Task-specific heads with uncertainty quantification
+            # 2. CME probability
+            cme_prob_output = layers.Dense(1, activation='sigmoid', name='cme_probability')(x)
 
-        # 1. Flare classification (B, C, M, X, None)
-        flare_class_logits = layers.Dense(5, name='flare_class_logits')(x)
-        flare_class_output = layers.Softmax(name='flare_class')(flare_class_logits)
+            # 3. X-ray brightness prediction (log scale)
+            xray_flux_output = self.build_uncertainty_quantification(x, 1)
+            # xray_flux_mean = tfpl.DistributionLambda(
+            #     lambda p: tfd.Normal(loc=p.mean(), scale=1e-6),
+            #     name='xray_flux'
+            # )(xray_flux_output)
+            xray_flux_mean = layers.Lambda(lambda p: p.mean(), name='xray_flux')(xray_flux_output)
 
-        # 2. CME probability
-        cme_prob_output = layers.Dense(1, activation='sigmoid', name='cme_probability')(x)
+            # 4. Time to event prediction with uncertainty
+            time_to_event_output = self.build_uncertainty_quantification(x, 1)
+            # time_to_event_mean = tfpl.DistributionLambda(
+            #     lambda p: tfd.Normal(loc=p.mean(), scale=1e-6),
+            #     name='time_to_event'
+            # )(time_to_event_output)
+            time_to_event_mean = layers.Lambda(lambda p: p.mean(), name='time_to_event')(time_to_event_output)
 
-        # 3. X-ray brightness prediction (log scale)
-        xray_flux_output = self.build_uncertainty_quantification(x, 1)
-        # xray_flux_mean = tfpl.DistributionLambda(
-        #     lambda p: tfd.Normal(loc=p.mean(), scale=1e-6),
-        #     name='xray_flux'
-        # )(xray_flux_output)
-        xray_flux_mean = layers.Lambda(lambda p: p.mean(), name='xray_flux')(xray_flux_output)
+            # Combine all inputs and outputs
+            model_inputs = [magnetogram_inputs] + list(aia_inputs.values())
+            model_outputs = [
+                flare_class_output,
+                cme_prob_output,
+                xray_flux_mean,
+                time_to_event_mean
+            ]
 
-        # 4. Time to event prediction with uncertainty
-        time_to_event_output = self.build_uncertainty_quantification(x, 1)
-        # time_to_event_mean = tfpl.DistributionLambda(
-        #     lambda p: tfd.Normal(loc=p.mean(), scale=1e-6),
-        #     name='time_to_event'
-        # )(time_to_event_output)
-        time_to_event_mean = layers.Lambda(lambda p: p.mean(), name='time_to_event')(time_to_event_output)
+            self.full_model = Model(inputs=model_inputs, outputs=model_outputs)
 
-        # Combine all inputs and outputs
-        model_inputs = [magnetogram_inputs] + list(aia_inputs.values())
-        model_outputs = [
-            flare_class_output,
-            cme_prob_output,
-            xray_flux_mean,
-            time_to_event_mean
-        ]
+            # Define custom loss function with physics constraints
+            losses = {
+                'flare_class': self.physics_guided_categorical_crossentropy,
+                'cme_probability': 'binary_crossentropy',
+                'xray_flux': self.physics_guided_mse_loss,
+                'time_to_event': self.physics_guided_time_to_event_loss
+            }
 
-        self.full_model = Model(inputs=model_inputs, outputs=model_outputs)
+            loss_weights = {
+                'flare_class': self.config['flare_class_weight'],
+                'cme_probability': self.config['cme_prob_weight'],
+                'xray_flux': self.config['xray_flux_weight'],
+                'time_to_event': self.config['time_to_event_weight']
+            }
 
-        # Define custom loss function with physics constraints
-        losses = {
-            'flare_class': self.physics_guided_categorical_crossentropy,
-            'cme_probability': 'binary_crossentropy',
-            'xray_flux': self.physics_guided_mse_loss,
-            'time_to_event': self.physics_guided_time_to_event_loss
-        }
+            metrics = {
+                'flare_class': ['accuracy', tfa.metrics.F1Score(num_classes=5, average='macro')],
+                'cme_probability': ['accuracy', tf.keras.metrics.AUC()],
+                'xray_flux': [tf.keras.metrics.MeanAbsoluteError()],
+                'time_to_event': [tf.keras.metrics.MeanAbsoluteError()]
+            }
 
-        loss_weights = {
-            'flare_class': self.config['flare_class_weight'],
-            'cme_probability': self.config['cme_prob_weight'],
-            'xray_flux': self.config['xray_flux_weight'],
-            'time_to_event': self.config['time_to_event_weight']
-        }
+            self.full_model.compile(
+                optimizer=tf.keras.optimizers.Adam(learning_rate=self.config['learning_rate']),
+                loss=losses,
+                loss_weights=loss_weights,
+                metrics=metrics
+            )
 
-        metrics = {
-            'flare_class': ['accuracy', tf.keras.metrics.F1Score(average='macro')],
-            'cme_probability': ['accuracy', tf.keras.metrics.AUC()],
-            'xray_flux': [tf.keras.metrics.MeanAbsoluteError()],
-            'time_to_event': [tf.keras.metrics.MeanAbsoluteError()]
-        }
+            summary_buffer = StringIO()
+            self.full_model.summary(print_fn=lambda x: summary_buffer.write(x + "\n"))
+            logger.info("Model Summary:\n%s", summary_buffer.getvalue())
 
-        self.full_model.compile(
-            optimizer=tf.keras.optimizers.Adam(learning_rate=self.config['learning_rate']),
-            loss=losses,
-            loss_weights=loss_weights,
-            metrics=metrics
-        )
+        except Exception as e:
+            logger.error("Error building model: %s", traceback.format_exc())
+            raise
 
         return self.full_model
 
@@ -534,42 +557,53 @@ class SolarFlarePredictor:
 
     def train_model(self, train_data, val_data, test_data=None):
         """Train the model with cross-validation"""
-        if not self.full_model:
-            self.build_full_model()
+        logger.info("Starting model training")
 
-        # Callbacks
-        callbacks = [
-            tf.keras.callbacks.EarlyStopping(
-                monitor='val_loss',
-                patience=self.config['early_stopping_patience'],
-                restore_best_weights=True
-            ),
-            tf.keras.callbacks.ReduceLROnPlateau(
-                monitor='val_loss',
-                factor=0.5,
-                patience=5,
-                min_lr=1e-6
-            ),
-            tf.keras.callbacks.ModelCheckpoint(
-                'best_solar_model.h5',
-                monitor='val_loss',
-                save_best_only=True
-            ),
-            tf.keras.callbacks.TensorBoard(log_dir='./logs')
-        ]
+        try:
+            if not self.full_model:
+                self.build_full_model()
 
-        # Train model
-        history = self.full_model.fit(
-            train_data,
-            validation_data=val_data,
-            epochs=self.config['epochs'],
-            callbacks=callbacks
-        )
+            # Callbacks
+            callbacks = [
+                tf.keras.callbacks.EarlyStopping(
+                    monitor='val_loss',
+                    patience=self.config['early_stopping_patience'],
+                    restore_best_weights=True
+                ),
+                tf.keras.callbacks.ReduceLROnPlateau(
+                    monitor='val_loss',
+                    factor=0.5,
+                    patience=5,
+                    min_lr=1e-6
+                ),
+                tf.keras.callbacks.ModelCheckpoint(
+                    'best_solar_model.h5',
+                    monitor='val_loss',
+                    save_best_only=True
+                ),
+                tf.keras.callbacks.TensorBoard(log_dir='./logs')
+            ]
 
-        # Evaluate if test data is provided
-        if test_data:
-            results = self.full_model.evaluate(test_data)
-            return history, results
+            # Train model
+            history = self.full_model.fit(
+                train_data,
+                validation_data=val_data,
+                epochs=self.config['epochs'],
+                callbacks=callbacks
+            )
+
+            logger.info("Training completed in %d epochs", len(history.history['loss']))
+            logger.debug("Training history: %s", history.history)
+
+            # Evaluate if test data is provided
+            if test_data:
+                # results = self.full_model.evaluate(test_data)
+                # return history, results
+                logger.info("Test results: %s", results)
+
+        except Exception as e:
+            logger.error("Training failed: %s", traceback.format_exc())
+            raise
 
         return history
 
@@ -761,37 +795,45 @@ class SolarDataGenerator(tf.keras.utils.Sequence):
             augment=False,
             class_weights=None
     ):
-        self.magnetogram_dir = magnetogram_dir
-        self.aia_dir = aia_dir
-        self.sequence_length = sequence_length
-        self.prediction_window = prediction_window
-        self.batch_size = batch_size
-        self.shuffle = shuffle
-        self.augment = augment
-        self.class_weights = class_weights
+        logger.info("Initializing SolarDataGenerator")
 
-        # Load metadata and features
-        self.magnetogram_features = pd.read_csv(magnetogram_features_csv)
-        self.aia_features = pd.read_csv(aia_features_csv)
-        self.goes_xray = pd.read_csv(goes_xray_csv)
-        self.flare_events = pd.read_csv(flare_events_csv)
+        try:
+            self.magnetogram_dir = magnetogram_dir
+            self.aia_dir = aia_dir
+            self.sequence_length = sequence_length
+            self.prediction_window = prediction_window
+            self.batch_size = batch_size
+            self.shuffle = shuffle
+            self.augment = augment
+            self.class_weights = class_weights
 
-        # Convert timestamps to datetime
-        self.magnetogram_features['timestamp'] = pd.to_datetime(self.magnetogram_features['timestamp'])
-        self.aia_features['timestamp'] = pd.to_datetime(self.aia_features['timestamp'])
-        self.goes_xray['timestamp'] = pd.to_datetime(self.goes_xray['timestamp'])
-        self.flare_events['start_time'] = pd.to_datetime(self.flare_events['start_time'])
-        self.flare_events['peak_time'] = pd.to_datetime(self.flare_events['peak_time'])
-        self.flare_events['end_time'] = pd.to_datetime(self.flare_events['end_time'])
+            # Load metadata and features
+            self.magnetogram_features = pd.read_csv(magnetogram_features_csv)
+            self.aia_features = pd.read_csv(aia_features_csv)
+            self.goes_xray = pd.read_csv(goes_xray_csv)
+            self.flare_events = pd.read_csv(flare_events_csv)
 
-        # Create sequences
-        self.create_sequences()
+            # Convert timestamps to datetime
+            self.magnetogram_features['timestamp'] = pd.to_datetime(self.magnetogram_features['timestamp'])
+            self.aia_features['timestamp'] = pd.to_datetime(self.aia_features['timestamp'])
+            self.goes_xray['timestamp'] = pd.to_datetime(self.goes_xray['timestamp'])
+            self.flare_events['start_time'] = pd.to_datetime(self.flare_events['start_time'])
+            self.flare_events['peak_time'] = pd.to_datetime(self.flare_events['peak_time'])
+            self.flare_events['end_time'] = pd.to_datetime(self.flare_events['end_time'])
 
-        # Initialize indexes
-        self.indexes = np.arange(len(self.sequences))
-        if self.shuffle:
-            np.random.shuffle(self.indexes)
+            # Create sequences
+            self.create_sequences()
 
+            # Initialize indexes
+            self.indexes = np.arange(len(self.sequences))
+            if self.shuffle:
+                np.random.shuffle(self.indexes)
+
+            logger.info("Loaded %d sequences", len(self.sequences))
+
+        except Exception as e:
+            logger.error("Data initialization failed: %s", traceback.format_exc())
+            raise
 
     def create_sequences(self):
         """Create sequences of data for training"""
@@ -871,135 +913,149 @@ class SolarDataGenerator(tf.keras.utils.Sequence):
 
     def __getitem__(self, index):
         """Generate one batch of data"""
-        # Generate indexes of the batch
-        batch_indexes = self.indexes[index * self.batch_size:(index + 1) * self.batch_size]
-        batch_sequences = [self.sequences[i] for i in batch_indexes]
+        logger.debug("Generating batch %d", index)
+        try:
+            # Generate indexes of the batch
+            batch_indexes = self.indexes[index * self.batch_size:(index + 1) * self.batch_size]
+            batch_sequences = [self.sequences[i] for i in batch_indexes]
 
-        # Generate data
-        X, y = self._generate_data(batch_sequences)
+            # Generate data
+            X, y = self._generate_data(batch_sequences)
 
-        return X, y
+            return X, y
+        except Exception as e:
+            logger.error("Error generating batch %d: %s", index, traceback.format_exc())
+            raise
 
 
     def on_epoch_end(self):
-        """Updates indexes after each epoch"""
-        self.indexes = np.arange(len(self.sequences))
-        if self.shuffle:
-            np.random.shuffle(self.indexes)
+            """Updates indexes after each epoch"""
+            self.indexes = np.arange(len(self.sequences))
+            if self.shuffle:
+                np.random.shuffle(self.indexes)
 
 
     def _generate_data(self, batch_sequences):
         """Generate data for a batch of sequences"""
-        # Initialize input arrays
-        magnetogram_batch = np.zeros(
-            (len(batch_sequences), self.sequence_length, 1024, 1024, 1),
-            dtype=np.float32
-        )
+        logger.debug("Generating data for %d sequences", len(batch_sequences))
 
-        # Initialize AIA wavelength inputs
-        aia_wavelengths = [94, 131, 171, 193, 211, 304, 335, 1600, 1700]
-        aia_batches = {}
-        for wavelength in aia_wavelengths:
-            aia_batches[wavelength] = np.zeros(
-                (len(batch_sequences), self.sequence_length, 512, 512, 1),
+        try:
+            # Initialize input arrays
+            magnetogram_batch = np.zeros(
+                (len(batch_sequences), self.sequence_length, 1024, 1024, 1),
                 dtype=np.float32
             )
 
-        # Initialize target arrays
-        flare_class_batch = np.zeros((len(batch_sequences), 5), dtype=np.float32)  # None, B, C, M, X
-        cme_prob_batch = np.zeros((len(batch_sequences), 1), dtype=np.float32)
-        xray_flux_batch = np.zeros((len(batch_sequences), 1), dtype=np.float32)
-        time_to_event_batch = np.zeros((len(batch_sequences), 1), dtype=np.float32)
-
-        # Load data for each sequence
-        for i, sequence in enumerate(batch_sequences):
-            # Load magnetogram data
-            for t, mag_idx in enumerate(sequence['magnetogram_indices'][:self.sequence_length]):
-                # Get the filename from metadata
-                mag_filename = f"{self.magnetogram_dir}/{self.magnetogram_features.loc[mag_idx, 'filename']}"
-
-                # Load magnetogram data
-                try:
-                    mag_data = np.load(mag_filename)
-                    # Normalize if needed
-                    mag_data = (mag_data - np.mean(mag_data)) / (np.std(mag_data) + 1e-8)
-                    # Reshape for input
-                    magnetogram_batch[i, t, :, :, 0] = mag_data
-                except Exception as e:
-                    print(f"Error loading magnetogram {mag_filename}: {e}")
-
-            # Load AIA data for each wavelength
+            # Initialize AIA wavelength inputs
+            aia_wavelengths = [94, 131, 171, 193, 211, 304, 335, 1600, 1700]
+            aia_batches = {}
             for wavelength in aia_wavelengths:
-                # Get AIA data for the sequence timeframes
-                seq_start = sequence['sequence_start']
-                seq_end = sequence['sequence_end']
+                aia_batches[wavelength] = np.zeros(
+                    (len(batch_sequences), self.sequence_length, 512, 512, 1),
+                    dtype=np.float32
+                )
 
-                aia_seq_data = self.aia_features[
-                    (self.aia_features['timestamp'] >= seq_start) &
-                    (self.aia_features['timestamp'] <= seq_end) &
-                    (self.aia_features['wavelength'] == wavelength)
-                    ]
+            # Initialize target arrays
+            flare_class_batch = np.zeros((len(batch_sequences), 5), dtype=np.float32)  # None, B, C, M, X
+            cme_prob_batch = np.zeros((len(batch_sequences), 1), dtype=np.float32)
+            xray_flux_batch = np.zeros((len(batch_sequences), 1), dtype=np.float32)
+            time_to_event_batch = np.zeros((len(batch_sequences), 1), dtype=np.float32)
 
-                if len(aia_seq_data) == 0:
-                    # No data for this wavelength, leave as zeros
-                    continue
+            # Load data for each sequence
+            for i, sequence in enumerate(batch_sequences):
+                # Load magnetogram data
+                for t, mag_idx in enumerate(sequence['magnetogram_indices'][:self.sequence_length]):
+                    # Get the filename from metadata
+                    mag_filename = f"{self.magnetogram_dir}/{self.magnetogram_features.loc[mag_idx, 'filename']}"
 
-                # Sort by timestamp
-                aia_seq_data = aia_seq_data.sort_values('timestamp')
-
-                for t, (_, row) in enumerate(aia_seq_data.iterrows()):
-                    if t >= self.sequence_length:
-                        break
-
-                    # Get the filename
-                    aia_filename = f"{self.aia_dir}/{row['filename']}"
-
-                    # Load AIA data
+                    # Load magnetogram data
                     try:
-                        aia_data = np.load(aia_filename)
-                        # Log-scale preprocessing
-                        aia_data = np.log10(aia_data + 1e-3)
-                        # Resize to 512x512 if needed (could use scipy.ndimage)
-                        # For this example, we'll assume it's already 512x512
-                        aia_batches[wavelength][i, t, :, :, 0] = aia_data
+                        mag_data = np.load(mag_filename)
+                        # Normalize if needed
+                        mag_data = (mag_data - np.mean(mag_data)) / (np.std(mag_data) + 1e-8)
+                        # Reshape for input
+                        magnetogram_batch[i, t, :, :, 0] = mag_data
                     except Exception as e:
-                        print(f"Error loading AIA {wavelength} image {aia_filename}: {e}")
+                        print(f"Error loading magnetogram {mag_filename}: {e}")
+                        logger.error("Error loading magnetogram %s: %s", mag_filename, traceback.format_exc())
 
-            # Set target values
-            flare_class = sequence['flare_class_numeric']
-            flare_class_batch[i, flare_class] = 1.0  # One-hot encoding
+                # Load AIA data for each wavelength
+                for wavelength in aia_wavelengths:
+                    # Get AIA data for the sequence timeframes
+                    seq_start = sequence['sequence_start']
+                    seq_end = sequence['sequence_end']
 
-            cme_prob_batch[i, 0] = sequence['cme_probability']
+                    aia_seq_data = self.aia_features[
+                        (self.aia_features['timestamp'] >= seq_start) &
+                        (self.aia_features['timestamp'] <= seq_end) &
+                        (self.aia_features['wavelength'] == wavelength)
+                        ]
 
-            xray_flux_batch[i, 0] = sequence['peak_xray_flux']
+                    if len(aia_seq_data) == 0:
+                        # No data for this wavelength, leave as zeros
+                        continue
 
-            time_to_event = sequence['time_to_flare']
-            if time_to_event > 0:
-                time_to_event_batch[i, 0] = time_to_event
-            else:
-                # No flare in the window, set to prediction window length
-                time_to_event_batch[i, 0] = self.prediction_window * 0.5  # hours
+                    # Sort by timestamp
+                    aia_seq_data = aia_seq_data.sort_values('timestamp')
 
-            # Apply data augmentation if enabled
-            if self.augment:
-                # Random horizontal flip
-                if np.random.rand() > 0.5:
-                    magnetogram_batch[i] = magnetogram_batch[i, :, :, ::-1, :]
-                    for wavelength in aia_wavelengths:
-                        aia_batches[wavelength][i] = aia_batches[wavelength][i, :, :, ::-1, :]
+                    for t, (_, row) in enumerate(aia_seq_data.iterrows()):
+                        if t >= self.sequence_length:
+                            break
 
-                # Random rotation (90, 180, 270 degrees)
-                k = np.random.randint(0, 4)  # 0: no rotation, 1: 90 deg, 2: 180 deg, 3: 270 deg
-                if k > 0:
-                    magnetogram_batch[i] = np.rot90(magnetogram_batch[i], k=k, axes=(1, 2))
-                    for wavelength in aia_wavelengths:
-                        aia_batches[wavelength][i] = np.rot90(aia_batches[wavelength][i], k=k, axes=(1, 2))
+                        # Get the filename
+                        aia_filename = f"{self.aia_dir}/{row['filename']}"
 
-        # Prepare inputs and outputs
-        X = [magnetogram_batch] + [aia_batches[wavelength] for wavelength in aia_wavelengths]
-        y = [flare_class_batch, cme_prob_batch, xray_flux_batch, time_to_event_batch]
+                        # Load AIA data
+                        try:
+                            aia_data = np.load(aia_filename)
+                            # Log-scale preprocessing
+                            aia_data = np.log10(aia_data + 1e-3)
+                            # Resize to 512x512 if needed (could use scipy.ndimage)
+                            # For this example, we'll assume it's already 512x512
+                            aia_batches[wavelength][i, t, :, :, 0] = aia_data
+                        except Exception as e:
+                            print(f"Error loading AIA {wavelength} image {aia_filename}: {e}")
+                            logger.error("Error loading AIA %s: %s", aia_filename, traceback.format_exc())
 
-        return X, y
+                # Set target values
+                flare_class = sequence['flare_class_numeric']
+                flare_class_batch[i, flare_class] = 1.0  # One-hot encoding
+
+                cme_prob_batch[i, 0] = sequence['cme_probability']
+
+                xray_flux_batch[i, 0] = sequence['peak_xray_flux']
+
+                time_to_event = sequence['time_to_flare']
+                if time_to_event > 0:
+                    time_to_event_batch[i, 0] = time_to_event
+                else:
+                    # No flare in the window, set to prediction window length
+                    time_to_event_batch[i, 0] = self.prediction_window * 0.5  # hours
+
+                # Apply data augmentation if enabled
+                if self.augment:
+                    # Random horizontal flip
+                    if np.random.rand() > 0.5:
+                        magnetogram_batch[i] = magnetogram_batch[i, :, :, ::-1, :]
+                        for wavelength in aia_wavelengths:
+                            aia_batches[wavelength][i] = aia_batches[wavelength][i, :, :, ::-1, :]
+
+                    # Random rotation (90, 180, 270 degrees)
+                    k = np.random.randint(0, 4)  # 0: no rotation, 1: 90 deg, 2: 180 deg, 3: 270 deg
+                    if k > 0:
+                        magnetogram_batch[i] = np.rot90(magnetogram_batch[i], k=k, axes=(1, 2))
+                        for wavelength in aia_wavelengths:
+                            aia_batches[wavelength][i] = np.rot90(aia_batches[wavelength][i], k=k, axes=(1, 2))
+
+            # Prepare inputs and outputs
+            X = [magnetogram_batch] + [aia_batches[wavelength] for wavelength in aia_wavelengths]
+            y = [flare_class_batch, cme_prob_batch, xray_flux_batch, time_to_event_batch]
+
+            return X, y
+
+        except Exception as e:
+            logger.error("Data generation failed: %s", traceback.format_exc())
+            raise
 
 
 class EnhancedSolarEvaluator:
@@ -1079,7 +1135,8 @@ class EnhancedSolarEvaluator:
 
             # Calculate metrics
             acc = accuracy_score(binned_true, binned_pred > 0.5)
-            tss = self.calculate_tss(binned_true, binned_pred > 0.5)
+            # tss = self.calculate_tss(binned_true, binned_pred > 0.5)
+            tss = calculate_tss(binned_true, binned_pred > 0.5)
             bss = self.calculate_brier_skill_score(binned_true, binned_pred)
 
             binned_results.append({
@@ -1133,7 +1190,8 @@ class EnhancedSolarEvaluator:
         for case in fp_cases + fn_cases:
             data = test_data[case['index']]
             case['gradcam'] = self.model.generate_feature_importance(data[0], 0)
-            case['integrated_grads'] = self.compute_integrated_gradients(data[0], 0)
+            case['integrated_grads'] = self.model.explainability.compute_integrated_gradients(data[0], 0)
+            # case['integrated_grads'] = self.compute_integrated_gradients(data[0], 0)
 
         return {'false_positives': fp_cases, 'false_negatives': fn_cases}
 
@@ -1210,137 +1268,452 @@ class EnhancedSolarExplainability:
 # Training and Evaluation
 def train_and_evaluate_model(config=None):
     """Main function to train and evaluate the model"""
-    # Default configuration
-    if config is None:
-        config = {
-            'data_dir': './data/processed',
-            'batch_size': 8,
-            'sequence_length': 24,  # 12 hours at 30-min cadence
-            'prediction_window': 48,  # 24 hours
-            'learning_rate': 1e-4,
-            'epochs': 100,
-            'val_split': 0.15,
-            'test_split': 0.15,
-            'cross_validation': True,
-            'n_folds': 5,
-            'optimize_hyperparams': True,
-            'mc_dropout_samples': 20
-        }
+    logger.info("Starting training pipeline")
 
-    # Set up paths
-    magnetogram_dir = f"{config['data_dir']}/magnetograms"
-    aia_dir = f"{config['data_dir']}/aia_images"
-    magnetogram_features_csv = f"{config['data_dir']}/features/magnetogram_features.csv"
-    aia_features_csv = f"{config['data_dir']}/features/aia_features.csv"
-    goes_xray_csv = f"{config['data_dir']}/goes_xray/goes_xray_flux.csv"
-    flare_events_csv = f"{config['data_dir']}/goes_xray/goes_flare_events.csv"
+    try:
 
-    # Create data generator
-    data_gen = SolarDataGenerator(
-        magnetogram_dir=magnetogram_dir,
-        aia_dir=aia_dir,
-        magnetogram_features_csv=magnetogram_features_csv,
-        aia_features_csv=aia_features_csv,
-        goes_xray_csv=goes_xray_csv,
-        flare_events_csv=flare_events_csv,
-        sequence_length=config['sequence_length'],
-        prediction_window=config['prediction_window'],
-        batch_size=config['batch_size'],
-        shuffle=True,
-        augment=True
-    )
+        # Default configuration
+        if config is None:
+            config = {
+                'data_dir': './data/processed',
+                'batch_size': 8,
+                'sequence_length': 24,  # 12 hours at 30-min cadence
+                'prediction_window': 48,  # 24 hours
+                'learning_rate': 1e-4,
+                'epochs': 100,
+                'val_split': 0.15,
+                'test_split': 0.15,
+                'cross_validation': True,
+                'n_folds': 5,
+                'optimize_hyperparams': True,
+                'mc_dropout_samples': 20
+            }
 
-    # Split data into train, validation, and test sets
-    indices = np.arange(len(data_gen.sequences))
-    np.random.shuffle(indices)
+        # Set up paths
+        magnetogram_dir = f"{config['data_dir']}/magnetograms"
+        aia_dir = f"{config['data_dir']}/aia_images"
+        magnetogram_features_csv = f"{config['data_dir']}/features/magnetogram_features.csv"
+        aia_features_csv = f"{config['data_dir']}/features/aia_features.csv"
+        goes_xray_csv = f"{config['data_dir']}/goes_xray/goes_xray_flux.csv"
+        flare_events_csv = f"{config['data_dir']}/goes_xray/goes_flare_events.csv"
 
-    if config['cross_validation']:
-        # Use stratified K-fold cross-validation
-        # Extract labels for stratification
-        labels = np.array([s['flare_class_numeric'] for s in data_gen.sequences])
+        # Create data generator
+        data_gen = SolarDataGenerator(
+            magnetogram_dir=magnetogram_dir,
+            aia_dir=aia_dir,
+            magnetogram_features_csv=magnetogram_features_csv,
+            aia_features_csv=aia_features_csv,
+            goes_xray_csv=goes_xray_csv,
+            flare_events_csv=flare_events_csv,
+            sequence_length=config['sequence_length'],
+            prediction_window=config['prediction_window'],
+            batch_size=config['batch_size'],
+            shuffle=True,
+            augment=True
+        )
 
-        skf = StratifiedKFold(n_splits=config['n_folds'], shuffle=True, random_state=42)
-        fold_results = []
-        explainability_dir = 'crossval_explanations'
-        os.makedirs(explainability_dir, exist_ok=True)
+        # Split data into train, validation, and test sets
+        indices = np.arange(len(data_gen.sequences))
+        np.random.shuffle(indices)
 
-        for fold, (train_idx, test_idx) in enumerate(skf.split(indices, labels)):
-            print(f"\nTraining fold {fold + 1}/{config['n_folds']}")
+        logger.info("Using configuration: %s", config)
+        logger.debug("Number of training sequences: %d", len(data_gen.sequences))
 
-            # Further split train into train and validation
-            train_val_labels = labels[train_idx]
-            train_val_indices = indices[train_idx]
+        if config['cross_validation']:
+            logger.info("Starting %d-fold cross-validation", config['n_folds'])
+            # Use stratified K-fold cross-validation
+            # Extract labels for stratification
+            labels = np.array([s['flare_class_numeric'] for s in data_gen.sequences])
 
-            # Stratified split for validation
-            train_indices, val_indices = train_test_split(
-                train_val_indices,
-                test_size=config['val_split'],
-                stratify=train_val_labels,
-                random_state=fold
-            )
+            skf = StratifiedKFold(n_splits=config['n_folds'], shuffle=True, random_state=42)
+            fold_results = []
+            explainability_dir = 'crossval_explanations'
+            os.makedirs(explainability_dir, exist_ok=True)
 
-            test_indices = indices[test_idx]
+            for fold, (train_idx, test_idx) in enumerate(skf.split(indices, labels)):
+                print(f"\nTraining fold {fold + 1}/{config['n_folds']}")
 
-            # # Create data generators for each set
-            # train_gen = tf.data.Dataset.from_generator(
-            #     lambda: ((data_gen._generate_data([data_gen.sequences[i] for i in batch]))
-            #              for batch in
-            #              np.array_split(train_indices, max(1, len(train_indices) // config['batch_size']))),
-            #     output_signature=(
-            #         (
-            #             tf.TensorSpec(shape=(None, config['sequence_length'], 1024, 1024, 1), dtype=tf.float32),
-            #             *[tf.TensorSpec(shape=(None, config['sequence_length'], 512, 512, 1), dtype=tf.float32)
-            #               for _ in range(9)]  # 9 AIA wavelengths
-            #         ),
-            #         (
-            #             tf.TensorSpec(shape=(None, 5), dtype=tf.float32),  # Flare class
-            #             tf.TensorSpec(shape=(None, 1), dtype=tf.float32),  # CME probability
-            #             tf.TensorSpec(shape=(None, 1), dtype=tf.float32),  # X-ray flux
-            #             tf.TensorSpec(shape=(None, 1), dtype=tf.float32)  # Time to event
-            #         )
-            #     )
-            # ).prefetch(tf.data.AUTOTUNE)
+                # Further split train into train and validation
+                train_val_labels = labels[train_idx]
+                train_val_indices = indices[train_idx]
+
+                # Stratified split for validation
+                train_indices, val_indices = train_test_split(
+                    train_val_indices,
+                    test_size=config['val_split'],
+                    stratify=train_val_labels,
+                    random_state=fold
+                )
+
+                test_indices = indices[test_idx]
+
+                # # Create data generators for each set
+                # train_gen = tf.data.Dataset.from_generator(
+                #     lambda: ((data_gen._generate_data([data_gen.sequences[i] for i in batch]))
+                #              for batch in
+                #              np.array_split(train_indices, max(1, len(train_indices) // config['batch_size']))),
+                #     output_signature=(
+                #         (
+                #             tf.TensorSpec(shape=(None, config['sequence_length'], 1024, 1024, 1), dtype=tf.float32),
+                #             *[tf.TensorSpec(shape=(None, config['sequence_length'], 512, 512, 1), dtype=tf.float32)
+                #               for _ in range(9)]  # 9 AIA wavelengths
+                #         ),
+                #         (
+                #             tf.TensorSpec(shape=(None, 5), dtype=tf.float32),  # Flare class
+                #             tf.TensorSpec(shape=(None, 1), dtype=tf.float32),  # CME probability
+                #             tf.TensorSpec(shape=(None, 1), dtype=tf.float32),  # X-ray flux
+                #             tf.TensorSpec(shape=(None, 1), dtype=tf.float32)  # Time to event
+                #         )
+                #     )
+                # ).prefetch(tf.data.AUTOTUNE)
+                #
+                # val_gen = tf.data.Dataset.from_generator(
+                #     lambda: ((data_gen._generate_data([data_gen.sequences[i] for i in batch]))
+                #              for batch in np.array_split(val_indices, max(1, len(val_indices) // config['batch_size']))),
+                #     output_signature=(
+                #         (
+                #             tf.TensorSpec(shape=(None, config['sequence_length'], 1024, 1024, 1), dtype=tf.float32),
+                #             *[tf.TensorSpec(shape=(None, config['sequence_length'], 512, 512, 1), dtype=tf.float32)
+                #               for _ in range(9)]
+                #         ),
+                #         (
+                #             tf.TensorSpec(shape=(None, 5), dtype=tf.float32),
+                #             tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
+                #             tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
+                #             tf.TensorSpec(shape=(None, 1), dtype=tf.float32)
+                #         )
+                #     )
+                # ).prefetch(tf.data.AUTOTUNE)
+                #
+                # test_gen = tf.data.Dataset.from_generator(
+                #     lambda: ((data_gen._generate_data([data_gen.sequences[i] for i in batch]))
+                #              for batch in np.array_split(test_indices, max(1, len(test_indices) // config['batch_size']))),
+                #     output_signature=(
+                #         (
+                #             tf.TensorSpec(shape=(None, config['sequence_length'], 1024, 1024, 1), dtype=tf.float32),
+                #             *[tf.TensorSpec(shape=(None, config['sequence_length'], 512, 512, 1), dtype=tf.float32)
+                #               for _ in range(9)]
+                #         ),
+                #         (
+                #             tf.TensorSpec(shape=(None, 5), dtype=tf.float32),
+                #             tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
+                #             tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
+                #             tf.TensorSpec(shape=(None, 1), dtype=tf.float32)
+                #         )
+                #     )
+                # ).prefetch(tf.data.AUTOTUNE)
+
+                # Create TensorFlow datasets
+                train_gen = create_tf_dataset(data_gen, train_indices, config)
+                val_gen = create_tf_dataset(data_gen, val_indices, config)
+                test_gen = create_tf_dataset(data_gen, test_idx, config)
+
+                # Create model
+                model_params = {
+                    'learning_rate': config['learning_rate'],
+                    'sequence_length': config['sequence_length'],
+                    'batch_size': config['batch_size']
+                }
+
+                # Add memory optimization for RTX 3060 (8GB VRAM)
+                # This involves using mixed precision and gradient accumulation
+                # Set memory growth to avoid OOM errors
+            #     physical_devices = tf.config.list_physical_devices('GPU')
+            #     if len(physical_devices) > 0:
+            #         tf.config.experimental.set_memory_growth(physical_devices[0], True)
+            #         print("Memory growth enabled for GPU")
             #
-            # val_gen = tf.data.Dataset.from_generator(
-            #     lambda: ((data_gen._generate_data([data_gen.sequences[i] for i in batch]))
-            #              for batch in np.array_split(val_indices, max(1, len(val_indices) // config['batch_size']))),
-            #     output_signature=(
-            #         (
-            #             tf.TensorSpec(shape=(None, config['sequence_length'], 1024, 1024, 1), dtype=tf.float32),
-            #             *[tf.TensorSpec(shape=(None, config['sequence_length'], 512, 512, 1), dtype=tf.float32)
-            #               for _ in range(9)]
-            #         ),
-            #         (
-            #             tf.TensorSpec(shape=(None, 5), dtype=tf.float32),
-            #             tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
-            #             tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
-            #             tf.TensorSpec(shape=(None, 1), dtype=tf.float32)
-            #         )
-            #     )
-            # ).prefetch(tf.data.AUTOTUNE)
+            #         # Enable mixed precision for better memory efficiency
+            #         policy = tf.keras.mixed_precision.Policy('mixed_float16')
+            #         tf.keras.mixed_precision.set_global_policy(policy)
+            #         print("Mixed precision enabled")
             #
-            # test_gen = tf.data.Dataset.from_generator(
-            #     lambda: ((data_gen._generate_data([data_gen.sequences[i] for i in batch]))
-            #              for batch in np.array_split(test_indices, max(1, len(test_indices) // config['batch_size']))),
-            #     output_signature=(
-            #         (
-            #             tf.TensorSpec(shape=(None, config['sequence_length'], 1024, 1024, 1), dtype=tf.float32),
-            #             *[tf.TensorSpec(shape=(None, config['sequence_length'], 512, 512, 1), dtype=tf.float32)
-            #               for _ in range(9)]
-            #         ),
-            #         (
-            #             tf.TensorSpec(shape=(None, 5), dtype=tf.float32),
-            #             tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
-            #             tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
-            #             tf.TensorSpec(shape=(None, 1), dtype=tf.float32)
+            #         # Further memory optimizations by reducing model size
+            #         # Reduce magnetogram resolution if needed
+            #         if config.get('reduce_magnetogram_resolution', True):
+            #             model_params['magnetogram_shape'] = (256, 256, 1)  # Reduced resolution
+            #             model_params['aia_shape'] = (128, 128, 1)  # Reduced resolution
+            #             print("Using reduced resolution for model inputs")
+            #
+            #     solar_model = SolarFlarePredictor(model_params)
+            #
+            #     # Optimize hyperparameters if enabled
+            #     if config['optimize_hyperparams'] and fold == 0:
+            #         print("Optimizing hyperparameters...")
+            #         best_params = solar_model.optimize_hyperparams(
+            #             train_gen,
+            #             val_gen,
+            #             {
+            #                 'learning_rate': (-5, -3),
+            #                 'dropout_rate': (0.1, 0.5),
+            #                 'l2_reg': (-6, -4),
+            #                 'transformer_heads': (2, 8.999)
+            #             },
+            #             n_iter=10  # Reduced for resources
             #         )
+            #
+            #         # Update model with optimized parameters
+            #         solar_model.config.update(best_params)
+            #         print(f"Optimized params: {best_params}")
+            #
+            #     # Build and train model
+            #     solar_model.build_full_model()
+            #
+            #     # Check model size and parameters
+            #     solar_model.full_model.summary()
+            #
+            #     # Train the model
+            #     history, results = solar_model.train_model(train_gen, val_gen, test_gen)
+            #
+            #     # Evaluate model performance
+            #     test_predictions = solar_model.predict_with_uncertainty(test_gen)
+            #
+            #     # Calculate metrics
+            #     # Extract test labels
+            #     test_batches = list(test_gen.as_numpy_iterator())
+            #     test_labels = [np.concatenate([b[1][i] for b in test_batches], axis=0)
+            #                    for i in range(4)]  # 4 outputs
+            #
+            #     # Classification metrics for flare class
+            #     flare_pred_class = np.argmax(test_predictions['flare_class_mean'], axis=1)
+            #     flare_true_class = np.argmax(test_labels[0], axis=1)
+            #
+            #     accuracy = accuracy_score(flare_true_class, flare_pred_class)
+            #     f1 = f1_score(flare_true_class, flare_pred_class, average='macro')
+            #
+            #     # True Skill Statistic (TSS)
+            #     tss = calculate_tss(flare_true_class, flare_pred_class)
+            #
+            #     # Heidke Skill Score (HSS)
+            #     hss = calculate_hss(flare_true_class, flare_pred_class)
+            #
+            #     # MSE for regression tasks
+            #     xray_mse = mean_squared_error(test_labels[2], test_predictions['xray_flux_mean'])
+            #     time_mse = mean_squared_error(test_labels[3], test_predictions['time_to_event_mean'])
+            #
+            #     # Print metrics
+            #     print(f"Fold {fold + 1} Results:")
+            #     print(f"Accuracy: {accuracy:.4f}")
+            #     print(f"F1 Score: {f1:.4f}")
+            #     print(f"True Skill Statistic (TSS): {tss:.4f}")
+            #     print(f"Heidke Skill Score (HSS): {hss:.4f}")
+            #     print(f"X-ray Flux MSE: {xray_mse:.6f}")
+            #     print(f"Time to Event MSE: {time_mse:.6f}")
+            #
+            #     # Save fold results
+            #     fold_results.append({
+            #         'fold': fold + 1,
+            #         'accuracy': accuracy,
+            #         'f1': f1,
+            #         'tss': tss,
+            #         'hss': hss,
+            #         'xray_mse': xray_mse,
+            #         'time_mse': time_mse
+            #     })
+            #
+            #     # Save model for this fold
+            #     solar_model.full_model.save(f"solar_model_fold_{fold + 1}.h5")
+            #
+            #     # Generate and save feature attributions
+            #     feature_importance = solar_model.generate_feature_importance(
+            #         next(iter(test_gen))[0],
+            #         target_output_idx=0  # Flare classification
             #     )
-            # ).prefetch(tf.data.AUTOTUNE)
+            #
+            #     np.save(f"feature_importance_fold_{fold + 1}.npy", feature_importance)
+            #
+            #     # Clear session to free memory
+            #     tf.keras.backend.clear_session()
+            #
+            # # Compute and print average performance across folds
+            # print("\nCross-validation Results:")
+            # metrics = ['accuracy', 'f1', 'tss', 'hss', 'xray_mse', 'time_mse']
+            # for metric in metrics:
+            #     values = [r[metric] for r in fold_results]
+            #     mean_value = np.mean(values)
+            #     std_value = np.std(values)
+            #     print(f"Mean {metric}: {mean_value:.4f} ± {std_value:.4f}")
+            #
+            # return fold_results
 
-            # Create TensorFlow datasets
-            train_gen = create_tf_dataset(data_gen, train_indices, config)
-            val_gen = create_tf_dataset(data_gen, val_indices, config)
-            test_gen = create_tf_dataset(data_gen, test_idx, config)
+                with tf.device('/GPU:0'):
+                    solar_model = SolarFlarePredictor(config)
+                    if config['optimize_hyperparams'] and fold == 0:
+                        # best_params = solar_model.optimize_hyperparams(train_gen, val_gen)
+                        best_params = solar_model.optimize_hyperparams(
+                            train_gen,
+                            val_gen,
+                            param_bounds={
+                                'learning_rate': (-5, -3),
+                                'dropout_rate': (0.1, 0.5),
+                                'l2_reg': (-6, -4),
+                                'transformer_heads': (2, 8.999)
+                            },
+                            n_iter=10
+                        )
+                        solar_model.config.update(best_params)
+
+                    solar_model.build_full_model()
+                    history = solar_model.train_model(train_gen, val_gen)
+                    solar_model.full_model.save(f"solar_model_fold_{fold + 1}.h5")
+
+                # Load model and create evaluator
+                loaded_model = tf.keras.models.load_model(
+                    f"solar_model_fold_{fold + 1}.h5",
+                    custom_objects={
+                        'physics_guided_categorical_crossentropy': solar_model.physics_guided_categorical_crossentropy,
+                        'physics_guided_mse_loss': solar_model.physics_guided_mse_loss,
+                        'physics_guided_time_to_event_loss': solar_model.physics_guided_time_to_event_loss
+                    }
+                )
+                loaded_model.predict = loaded_model.predict_with_uncertainty
+                evaluator = EnhancedSolarEvaluator(loaded_model, config)
+
+                # Full evaluation
+                print(f"\nEvaluating fold {fold + 1}...")
+                # eval_report = evaluator.evaluate_model(test_gen)
+                eval_report = solar_model.evaluate_model(test_gen)
+
+                # Save metrics
+                fold_results.append({
+                    'fold': fold + 1,
+                    'metrics': eval_report,
+                    'history': history.history
+                })
+
+                # Generate and save explanations
+                print(f"Generating explanations for fold {fold + 1}...")
+                for case_type in ['false_positives', 'false_negatives']:
+                    for i, case in enumerate(eval_report['false_cases'][case_type][:3]):
+                        # Plot input sequence
+                        plot_input(
+                            case['metadata'],
+                            os.path.join(explainability_dir,
+                                         f"fold_{fold + 1}_{case_type[:2]}_{i}_input.png")
+                        )
+
+                        # Plot attribution maps
+                        plt.figure(figsize=(15, 5))
+                        plt.subplot(1, 3, 1)
+                        plt.imshow(case['gradcam'], cmap='hot')
+                        plt.title('Grad-CAM')
+
+                        plt.subplot(1, 3, 2)
+                        plt.imshow(case['integrated_grads'].mean(axis=-1), cmap='hot')
+                        plt.title('Integrated Gradients')
+
+                        plt.subplot(1, 3, 3)
+                        diff = np.abs(case['metadata']['magnetogram'][-1] -
+                                      case['counterfactual'][0, -1, ..., 0])
+                        plt.imshow(diff, cmap='hot')
+                        plt.title('Counterfactual Differences')
+
+                        plt.savefig(os.path.join(explainability_dir,
+                                                 f"fold_{fold + 1}_{case_type[:2]}_{i}_attrib.png"))
+                        plt.close()
+
+
+
+                # Clean up resources
+                del loaded_model
+                tf.keras.backend.clear_session()
+                gc.collect()
+
+            # Aggregate and save cross-validation results
+            final_metrics = defaultdict(list)
+            for fr in fold_results:
+                for metric in ['accuracy', 'tss', 'hss', 'bss']:
+                    final_metrics[metric].append(fr['metrics'][metric])
+                for calib in ['ece', 'mce']:
+                    final_metrics[calib].append(fr['metrics']['reliability'][calib])
+
+            print("\nCross-validation Results Summary:")
+            for metric, values in final_metrics.items():
+                mean_val = np.mean(values)
+                std_val = np.std(values)
+                print(f"{metric.upper():<8}: {mean_val:.4f} ± {std_val:.4f}")
+
+            # Plot training history across folds
+            plt.figure(figsize=(12, 8))
+            for fold in fold_results:
+                plt.plot(fold['history']['val_loss'], alpha=0.5, label=f'Fold {fold["fold"]}')
+            plt.plot(np.mean([f['history']['val_loss'] for f in fold_results], axis=0),
+                     'k--', linewidth=2, label='Mean')
+            plt.title('Validation Loss Across Folds')
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.legend()
+            plt.savefig('crossval_loss.png')
+            plt.close()
+
+
+            return fold_results
+
+
+        else:
+            # Simple train/val/test split
+            val_size = int(config['val_split'] * len(indices))
+            test_size = int(config['test_split'] * len(indices))
+            train_size = len(indices) - val_size - test_size
+
+            train_indices = indices[:train_size]
+            val_indices = indices[train_size:train_size + val_size]
+            test_indices = indices[train_size + val_size:]
+
+            # Create data generators
+            train_gen = tf.data.Dataset.from_generator(
+                lambda: ((data_gen._generate_data([data_gen.sequences[i] for i in batch]))
+                         for batch in np.array_split(train_indices, max(1, len(train_indices) // config['batch_size']))),
+                output_signature=(
+                    (
+                        tf.TensorSpec(shape=(None, config['sequence_length'], 1024, 1024, 1), dtype=tf.float32),
+                        *[tf.TensorSpec(shape=(None, config['sequence_length'], 512, 512, 1), dtype=tf.float32)
+                          for _ in range(9)]
+                    ),
+                    (
+                        tf.TensorSpec(shape=(None, 5), dtype=tf.float32),
+                        tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
+                        tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
+                        tf.TensorSpec(shape=(None, 1), dtype=tf.float32)
+                    )
+                )
+            ).prefetch(tf.data.AUTOTUNE)
+
+            val_gen = tf.data.Dataset.from_generator(
+                lambda: ((data_gen._generate_data([data_gen.sequences[i] for i in batch]))
+                         for batch in np.array_split(val_indices, max(1, len(val_indices) // config['batch_size']))),
+                output_signature=(
+                    (
+                        tf.TensorSpec(shape=(None, config['sequence_length'], 1024, 1024, 1), dtype=tf.float32),
+                        *[tf.TensorSpec(shape=(None, config['sequence_length'], 512, 512, 1), dtype=tf.float32)
+                          for _ in range(9)]
+                    ),
+                    (
+                        tf.TensorSpec(shape=(None, 5), dtype=tf.float32),
+                        tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
+                        tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
+                        tf.TensorSpec(shape=(None, 1), dtype=tf.float32)
+                    )
+                )
+            ).prefetch(tf.data.AUTOTUNE)
+
+            test_gen = tf.data.Dataset.from_generator(
+                lambda: ((data_gen._generate_data([data_gen.sequences[i] for i in batch]))
+                         for batch in np.array_split(test_indices, max(1, len(test_indices) // config['batch_size']))),
+                output_signature=(
+                    (
+                        tf.TensorSpec(shape=(None, config['sequence_length'], 1024, 1024, 1), dtype=tf.float32),
+                        *[tf.TensorSpec(shape=(None, config['sequence_length'], 512, 512, 1), dtype=tf.float32)
+                          for _ in range(9)]
+                    ),
+                    (
+                        tf.TensorSpec(shape=(None, 5), dtype=tf.float32),
+                        tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
+                        tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
+                        tf.TensorSpec(shape=(None, 1), dtype=tf.float32)
+                    )
+                )
+            ).prefetch(tf.data.AUTOTUNE)
 
             # Create model
             model_params = {
@@ -1349,30 +1722,28 @@ def train_and_evaluate_model(config=None):
                 'batch_size': config['batch_size']
             }
 
-            # Add memory optimization for RTX 3060 (8GB VRAM)
-            # This involves using mixed precision and gradient accumulation
-            # Set memory growth to avoid OOM errors
+            # Add memory optimization for RTX 3060
             physical_devices = tf.config.list_physical_devices('GPU')
             if len(physical_devices) > 0:
+                logger.info("GPU detected, enabling memory optimizations")
                 tf.config.experimental.set_memory_growth(physical_devices[0], True)
                 print("Memory growth enabled for GPU")
 
-                # Enable mixed precision for better memory efficiency
+                # Enable mixed precision
                 policy = tf.keras.mixed_precision.Policy('mixed_float16')
                 tf.keras.mixed_precision.set_global_policy(policy)
                 print("Mixed precision enabled")
 
-                # Further memory optimizations by reducing model size
-                # Reduce magnetogram resolution if needed
+                # Reduce resolution if needed
                 if config.get('reduce_magnetogram_resolution', True):
-                    model_params['magnetogram_shape'] = (256, 256, 1)  # Reduced resolution
-                    model_params['aia_shape'] = (128, 128, 1)  # Reduced resolution
+                    model_params['magnetogram_shape'] = (256, 256, 1)
+                    model_params['aia_shape'] = (128, 128, 1)
                     print("Using reduced resolution for model inputs")
 
             solar_model = SolarFlarePredictor(model_params)
 
             # Optimize hyperparameters if enabled
-            if config['optimize_hyperparams'] and fold == 0:
+            if config['optimize_hyperparams']:
                 print("Optimizing hyperparameters...")
                 best_params = solar_model.optimize_hyperparams(
                     train_gen,
@@ -1383,7 +1754,7 @@ def train_and_evaluate_model(config=None):
                         'l2_reg': (-6, -4),
                         'transformer_heads': (2, 8.999)
                     },
-                    n_iter=10  # Reduced for resources
+                    n_iter=10
                 )
 
                 # Update model with optimized parameters
@@ -1392,41 +1763,33 @@ def train_and_evaluate_model(config=None):
 
             # Build and train model
             solar_model.build_full_model()
-
-            # Check model size and parameters
             solar_model.full_model.summary()
 
             # Train the model
             history, results = solar_model.train_model(train_gen, val_gen, test_gen)
 
-            # Evaluate model performance
+            # Evaluate model and calculate metrics
             test_predictions = solar_model.predict_with_uncertainty(test_gen)
 
-            # Calculate metrics
             # Extract test labels
             test_batches = list(test_gen.as_numpy_iterator())
             test_labels = [np.concatenate([b[1][i] for b in test_batches], axis=0)
-                           for i in range(4)]  # 4 outputs
+                           for i in range(4)]
 
-            # Classification metrics for flare class
+            # Calculate metrics
             flare_pred_class = np.argmax(test_predictions['flare_class_mean'], axis=1)
             flare_true_class = np.argmax(test_labels[0], axis=1)
 
             accuracy = accuracy_score(flare_true_class, flare_pred_class)
             f1 = f1_score(flare_true_class, flare_pred_class, average='macro')
-
-            # True Skill Statistic (TSS)
             tss = calculate_tss(flare_true_class, flare_pred_class)
-
-            # Heidke Skill Score (HSS)
             hss = calculate_hss(flare_true_class, flare_pred_class)
 
-            # MSE for regression tasks
             xray_mse = mean_squared_error(test_labels[2], test_predictions['xray_flux_mean'])
             time_mse = mean_squared_error(test_labels[3], test_predictions['time_to_event_mean'])
 
             # Print metrics
-            print(f"Fold {fold + 1} Results:")
+            print("\nTest Results:")
             print(f"Accuracy: {accuracy:.4f}")
             print(f"F1 Score: {f1:.4f}")
             print(f"True Skill Statistic (TSS): {tss:.4f}")
@@ -1434,19 +1797,9 @@ def train_and_evaluate_model(config=None):
             print(f"X-ray Flux MSE: {xray_mse:.6f}")
             print(f"Time to Event MSE: {time_mse:.6f}")
 
-            # Save fold results
-            fold_results.append({
-                'fold': fold + 1,
-                'accuracy': accuracy,
-                'f1': f1,
-                'tss': tss,
-                'hss': hss,
-                'xray_mse': xray_mse,
-                'time_mse': time_mse
-            })
 
-            # Save model for this fold
-            solar_model.full_model.save(f"solar_model_fold_{fold + 1}.h5")
+            # Save the model
+            solar_model.full_model.save("solar_model_final.h5")
 
             # Generate and save feature attributions
             feature_importance = solar_model.generate_feature_importance(
@@ -1454,204 +1807,38 @@ def train_and_evaluate_model(config=None):
                 target_output_idx=0  # Flare classification
             )
 
-            np.save(f"feature_importance_fold_{fold + 1}.npy", feature_importance)
+        np.save("feature_importance_final.npy", feature_importance)
 
-            # Clear session to free memory
-            tf.keras.backend.clear_session()
+        # Plot feature importance
+        plt.figure(figsize=(10, 10))
+        plt.imshow(feature_importance, cmap='viridis')
+        plt.colorbar(label='Feature Importance')
+        plt.title('Feature Importance Map')
+        plt.savefig('feature_importance_map.png')
+        plt.close()
 
-        # Compute and print average performance across folds
-        print("\nCross-validation Results:")
-        metrics = ['accuracy', 'f1', 'tss', 'hss', 'xray_mse', 'time_mse']
-        for metric in metrics:
-            values = [r[metric] for r in fold_results]
-            mean_value = np.mean(values)
-            std_value = np.std(values)
-            print(f"Mean {metric}: {mean_value:.4f} ± {std_value:.4f}")
-
-        return fold_results
-
-    else:
-        # Simple train/val/test split
-        val_size = int(config['val_split'] * len(indices))
-        test_size = int(config['test_split'] * len(indices))
-        train_size = len(indices) - val_size - test_size
-
-        train_indices = indices[:train_size]
-        val_indices = indices[train_size:train_size + val_size]
-        test_indices = indices[train_size + val_size:]
-
-        # Create data generators
-        train_gen = tf.data.Dataset.from_generator(
-            lambda: ((data_gen._generate_data([data_gen.sequences[i] for i in batch]))
-                     for batch in np.array_split(train_indices, max(1, len(train_indices) // config['batch_size']))),
-            output_signature=(
-                (
-                    tf.TensorSpec(shape=(None, config['sequence_length'], 1024, 1024, 1), dtype=tf.float32),
-                    *[tf.TensorSpec(shape=(None, config['sequence_length'], 512, 512, 1), dtype=tf.float32)
-                      for _ in range(9)]
-                ),
-                (
-                    tf.TensorSpec(shape=(None, 5), dtype=tf.float32),
-                    tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
-                    tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
-                    tf.TensorSpec(shape=(None, 1), dtype=tf.float32)
-                )
-            )
-        ).prefetch(tf.data.AUTOTUNE)
-
-        val_gen = tf.data.Dataset.from_generator(
-            lambda: ((data_gen._generate_data([data_gen.sequences[i] for i in batch]))
-                     for batch in np.array_split(val_indices, max(1, len(val_indices) // config['batch_size']))),
-            output_signature=(
-                (
-                    tf.TensorSpec(shape=(None, config['sequence_length'], 1024, 1024, 1), dtype=tf.float32),
-                    *[tf.TensorSpec(shape=(None, config['sequence_length'], 512, 512, 1), dtype=tf.float32)
-                      for _ in range(9)]
-                ),
-                (
-                    tf.TensorSpec(shape=(None, 5), dtype=tf.float32),
-                    tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
-                    tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
-                    tf.TensorSpec(shape=(None, 1), dtype=tf.float32)
-                )
-            )
-        ).prefetch(tf.data.AUTOTUNE)
-
-        test_gen = tf.data.Dataset.from_generator(
-            lambda: ((data_gen._generate_data([data_gen.sequences[i] for i in batch]))
-                     for batch in np.array_split(test_indices, max(1, len(test_indices) // config['batch_size']))),
-            output_signature=(
-                (
-                    tf.TensorSpec(shape=(None, config['sequence_length'], 1024, 1024, 1), dtype=tf.float32),
-                    *[tf.TensorSpec(shape=(None, config['sequence_length'], 512, 512, 1), dtype=tf.float32)
-                      for _ in range(9)]
-                ),
-                (
-                    tf.TensorSpec(shape=(None, 5), dtype=tf.float32),
-                    tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
-                    tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
-                    tf.TensorSpec(shape=(None, 1), dtype=tf.float32)
-                )
-            )
-        ).prefetch(tf.data.AUTOTUNE)
-
-        # Create model
-        model_params = {
-            'learning_rate': config['learning_rate'],
-            'sequence_length': config['sequence_length'],
-            'batch_size': config['batch_size']
+        # Return final results
+        return {
+            'accuracy': accuracy,
+            'f1': f1,
+            'tss': tss,
+            'hss': hss,
+            'xray_mse': xray_mse,
+            'time_mse': time_mse,
+            'history': history.history,
+            'test_predictions': test_predictions,
+            'test_labels': test_labels
         }
 
-        # Add memory optimization for RTX 3060
-        physical_devices = tf.config.list_physical_devices('GPU')
-        if len(physical_devices) > 0:
-            tf.config.experimental.set_memory_growth(physical_devices[0], True)
-            print("Memory growth enabled for GPU")
-
-            # Enable mixed precision
-            policy = tf.keras.mixed_precision.Policy('mixed_float16')
-            tf.keras.mixed_precision.set_global_policy(policy)
-            print("Mixed precision enabled")
-
-            # Reduce resolution if needed
-            if config.get('reduce_magnetogram_resolution', True):
-                model_params['magnetogram_shape'] = (256, 256, 1)
-                model_params['aia_shape'] = (128, 128, 1)
-                print("Using reduced resolution for model inputs")
-
-        solar_model = SolarFlarePredictor(model_params)
-
-        # Optimize hyperparameters if enabled
-        if config['optimize_hyperparams']:
-            print("Optimizing hyperparameters...")
-            best_params = solar_model.optimize_hyperparams(
-                train_gen,
-                val_gen,
-                {
-                    'learning_rate': (-5, -3),
-                    'dropout_rate': (0.1, 0.5),
-                    'l2_reg': (-6, -4),
-                    'transformer_heads': (2, 8.999)
-                },
-                n_iter=10
-            )
-
-            # Update model with optimized parameters
-            solar_model.config.update(best_params)
-            print(f"Optimized params: {best_params}")
-
-        # Build and train model
-        solar_model.build_full_model()
-        solar_model.full_model.summary()
-
-        # Train the model
-        history, results = solar_model.train_model(train_gen, val_gen, test_gen)
-
-        # Evaluate model and calculate metrics
-        test_predictions = solar_model.predict_with_uncertainty(test_gen)
-
-        # Extract test labels
-        test_batches = list(test_gen.as_numpy_iterator())
-        test_labels = [np.concatenate([b[1][i] for b in test_batches], axis=0)
-                       for i in range(4)]
-
-        # Calculate metrics
-        flare_pred_class = np.argmax(test_predictions['flare_class_mean'], axis=1)
-        flare_true_class = np.argmax(test_labels[0], axis=1)
-
-        accuracy = accuracy_score(flare_true_class, flare_pred_class)
-        f1 = f1_score(flare_true_class, flare_pred_class, average='macro')
-        tss = calculate_tss(flare_true_class, flare_pred_class)
-        hss = calculate_hss(flare_true_class, flare_pred_class)
-
-        xray_mse = mean_squared_error(test_labels[2], test_predictions['xray_flux_mean'])
-        time_mse = mean_squared_error(test_labels[3], test_predictions['time_to_event_mean'])
-
-        # Print metrics
-        print("\nTest Results:")
-        print(f"Accuracy: {accuracy:.4f}")
-        print(f"F1 Score: {f1:.4f}")
-        print(f"True Skill Statistic (TSS): {tss:.4f}")
-        print(f"Heidke Skill Score (HSS): {hss:.4f}")
-        print(f"X-ray Flux MSE: {xray_mse:.6f}")
-        print(f"Time to Event MSE: {time_mse:.6f}")
-
-        # Save the model
-        solar_model.full_model.save("solar_model_final.h5")
-
-        # Generate and save feature attributions
-        feature_importance = solar_model.generate_feature_importance(
-            next(iter(test_gen))[0],
-            target_output_idx=0  # Flare classification
-        )
-
-    np.save("feature_importance_final.npy", feature_importance)
-
-    # Plot feature importance
-    plt.figure(figsize=(10, 10))
-    plt.imshow(feature_importance, cmap='viridis')
-    plt.colorbar(label='Feature Importance')
-    plt.title('Feature Importance Map')
-    plt.savefig('feature_importance_map.png')
-    plt.close()
-
-    # Return final results
-    return {
-        'accuracy': accuracy,
-        'f1': f1,
-        'tss': tss,
-        'hss': hss,
-        'xray_mse': xray_mse,
-        'time_mse': time_mse,
-        'history': history.history,
-        'test_predictions': test_predictions,
-        'test_labels': test_labels
-    }
+    except Exception as e:
+        logger.error("Training pipeline failed: %s", traceback.format_exc())
+        raise
 
 
 # Helper functions for skill scores
 def calculate_tss(y_true, y_pred):
     """Calculate True Skill Statistic (TSS)"""
+    logger.debug("Calculating TSS")
     from sklearn.metrics import confusion_matrix
     cm = confusion_matrix(y_true, y_pred)
     tn, fp, fn, tp = cm.ravel()
@@ -1661,6 +1848,7 @@ def calculate_tss(y_true, y_pred):
 
 def calculate_hss(y_true, y_pred):
     """Calculate Heidke Skill Score (HSS)"""
+    logger.debug("Calculating HSS")
     from sklearn.metrics import confusion_matrix
     cm = confusion_matrix(y_true, y_pred)
     tn, fp, fn, tp = cm.ravel()
@@ -1670,8 +1858,10 @@ def calculate_hss(y_true, y_pred):
 
 # Main execution
 if __name__ == "__main__":
+    logger.info("Starting main execution")
     # Run training and evaluation
     results = train_and_evaluate_model()
+    logger.info("Training completed successfully")
 
     # Print final results
     print("\nFinal Model Performance:")
@@ -1699,11 +1889,24 @@ if __name__ == "__main__":
 
 def plot_input(metadata, filename):
     """Visualize input sequence"""
+    # plt.figure(figsize=(20, 5))
+    # for t in range(3):  # Show first 3 time steps
+    #     plt.subplot(1, 3, t + 1)
+    #     plt.imshow(metadata['magnetogram'][t], cmap='gray')
+    #     plt.title(f"T-{(3 - t) * 0.5}h")
+    # plt.savefig(filename)
+    # plt.close()
+
     plt.figure(figsize=(20, 5))
     for t in range(3):  # Show first 3 time steps
         plt.subplot(1, 3, t + 1)
-        plt.imshow(metadata['magnetogram'][t], cmap='gray')
+        img_path = os.path.join(metadata['magnetogram_dir'],
+                                metadata['magnetogram_files'][t])
+        img = np.load(img_path)
+        plt.imshow(img, cmap='gray', vmin=-100, vmax=100)
         plt.title(f"T-{(3 - t) * 0.5}h")
+        plt.axis('off')
+    plt.tight_layout()
     plt.savefig(filename)
     plt.close()
 
@@ -1728,3 +1931,24 @@ def plot_attributions(case, filename):
     plt.tight_layout()
     plt.savefig(filename)
     plt.close()
+
+
+# Helper function to create TF datasets
+def create_tf_dataset(data_gen, indices, config):
+    return tf.data.Dataset.from_generator(
+        lambda: (data_gen._generate_data([data_gen.sequences[i] for i in batch])
+                for batch in np.array_split(indices, max(1, len(indices)//config['batch_size']))),
+        output_signature=(
+            (
+                tf.TensorSpec(shape=(None, config['sequence_length'], 1024, 1024, 1), dtype=tf.float32),
+                *[tf.TensorSpec(shape=(None, config['sequence_length'], 512, 512, 1), dtype=tf.float32)
+                  for _ in range(9)]
+            ),
+            (
+                tf.TensorSpec(shape=(None, 5), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, 1), dtype=tf.float32)
+            )
+        )
+    ).prefetch(tf.data.AUTOTUNE)
