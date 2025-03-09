@@ -359,7 +359,7 @@ class SolarFlarePredictor:
             units=tfpl.IndependentNormal.params_size(output_dims),
             make_prior_fn=lambda *args, **kwargs: prior,
             # make_posterior_fn=tfpl.util.default_mean_field_normal_fn(),
-            make_posterior_fn=default_mean_field_normal_fn,
+            make_posterior_fn=default_mean_field_normal_fn(),
             kl_weight=1 / self.config['batch_size'],
             activation=None
         )(x)
