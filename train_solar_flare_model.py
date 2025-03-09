@@ -1298,8 +1298,10 @@ def train_and_evaluate_model(config=None):
             config = {
                 'data_dir': './data/processed',
                 'batch_size': 8,
-                'sequence_length': 24,  # 12 hours at 30-min cadence
-                'prediction_window': 44,  # 24 hours
+                # 'sequence_length': 24,  # 12 hours at 30-min cadence
+                # 'prediction_window': 48,  # 24 hours
+                'sequence_length': 12,
+                'prediction_window': 12,
                 'learning_rate': 1e-4,
                 'epochs': 100,
                 'val_split': 0.15,
