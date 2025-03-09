@@ -360,8 +360,11 @@ class SolarFlarePredictor:
             make_prior_fn=lambda *args, **kwargs: prior,
             # make_posterior_fn=tfpl.util.default_mean_field_normal_fn(),
             # make_posterior_fn=default_mean_field_normal_fn(),
-            make_posterior_fn=lambda *args, **kwargs: default_mean_field_normal_fn()(trainable=True,
-                                                                                     add_variable_fn=tf.keras.backend.variable),
+            make_posterior_fn=lambda dtype, shape, name, *args, **kwargs: default_mean_field_normal_fn()(dtype=dtype,
+                                                                                                         shape=shape,
+                                                                                                         name=name,
+                                                                                                         trainable=True,
+                                                                                                         add_variable_fn=tf.keras.backend.variable),
             kl_weight=1 / self.config['batch_size'],
             activation=None
         )(x)
