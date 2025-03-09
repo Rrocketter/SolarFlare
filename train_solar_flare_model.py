@@ -846,7 +846,13 @@ class SolarDataGenerator(tf.keras.utils.Sequence):
         unique_timestamps = self.magnetogram_features['timestamp'].unique()
         unique_timestamps.sort()
 
-        for i in range(len(unique_timestamps) - self.sequence_length - self.prediction_window):
+        if len(unique_timestamps) < self.sequence_length + self.prediction_window:
+        raise ValueError(
+            f"Not enough timestamps ({len(unique_timestamps)}) for "
+            f"sequence_length ({self.sequence_length}) + prediction_window ({self.prediction_window})"
+        )
+
+        for i in range(len(unique_timestamps) - self.sequence_length - self.prediction_windowm +1):
             # Get sequence timestamps
             seq_timestamps = unique_timestamps[i:i + self.sequence_length]
             target_timestamp = unique_timestamps[i + self.sequence_length]
