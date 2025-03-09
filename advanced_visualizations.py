@@ -4,1007 +4,1210 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.colors import LogNorm, SymLogNorm
 import seaborn as sns
-from mpl_toolkits.mplot3d import Axes3D
-import plotly.graph_objects as go
-import plotly.express as px
-from plotly.subplots import make_subplots
-import datetime
+from datetime import datetime, timedelta
+import matplotlib.gridspec as gridspec
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+from matplotlib.patches import ConnectionPatch
 import os
-from matplotlib.animation import FuncAnimation
-from scipy.ndimage import gaussian_filter
-import networkx as nx
-from skimage import measure
-from matplotlib import cm
+from pathlib import Path
+import glob
+import warnings
 
-# Set style parameters
-plt.style.use('dark_background')
-sns.set_context("notebook", font_scale=1.2)
+warnings.filterwarnings('ignore')
 
-# Sample paths - replace with your actual paths
-MAGNETOGRAM_PATH = "data/processed/magnetograms/"
-AIA_PATH = "data/processed/aia_images/"
-GOES_PATH = "data/processed/goes_xray/"
-FEATURES_PATH = "data/processed/features/"
+# Set the style
+plt.style.use('seaborn-v0_8-whitegrid')
+sns.set_context("talk")
 
-# Load metadata and features
-magnetogram_features = pd.read_csv(f"{FEATURES_PATH}magnetogram_features.csv")
-magnetogram_features['timestamp'] = pd.to_datetime(magnetogram_features['timestamp'])
-
-aia_features = pd.read_csv(f"{FEATURES_PATH}aia_features.csv")
-aia_features['timestamp'] = pd.to_datetime(aia_features['timestamp'])
-
-goes_flux = pd.read_csv(f"{GOES_PATH}goes_xray_flux.csv")
-goes_flux['timestamp'] = pd.to_datetime(goes_flux['timestamp'])
-
-flare_events = pd.read_csv(f"{GOES_PATH}goes_flare_events.csv")
-flare_events['start_time'] = pd.to_datetime(flare_events['start_time'])
-flare_events['peak_time'] = pd.to_datetime(flare_events['peak_time'])
-flare_events['end_time'] = pd.to_datetime(flare_events['end_time'])
+# Create output directory
+output_dir = "advanced_visualizations2"
+os.makedirs(output_dir, exist_ok=True)
 
 
-# Function to load a sample magnetogram
-def load_sample_magnetogram():
-    np.random.seed(42)
-    mag = np.random.normal(0, 200, (512, 512))
-    mag = gaussian_filter(mag, sigma=5)
-    return mag
+def load_data(data_root="data/processed"):
+    """
+    Load the data from the processed data directory structure
+
+    Parameters:
+    data_root (str): Root path to the processed data directory
+
+    Returns:
+    dict: Dictionary containing loaded data and metadata
+    """
+    print(f"Loading data from {data_root}...")
+
+    data = {}
+
+    # 1. Load magnetogram data
+    mag_dir = os.path.join(data_root, "magnetograms")
+    if os.path.exists(mag_dir):
+        # Load a sample magnetogram
+        mag_files = glob.glob(os.path.join(mag_dir, "*.npy"))
+        if mag_files:
+            # Load the first magnetogram file
+            data['sample_magnetogram'] = np.load(mag_files[0])
+            print(f"Loaded magnetogram: {mag_files[0]}")
+
+        # Load magnetogram metadata
+        meta_file = os.path.join(mag_dir, "magnetogram_metadata.csv")
+        if os.path.exists(meta_file):
+            data['magnetogram_metadata'] = pd.read_csv(meta_file)
+            print(f"Loaded magnetogram metadata: {len(data['magnetogram_metadata'])} entries")
+
+    # 2. Load AIA images
+    aia_dir = os.path.join(data_root, "aia_images")
+    if os.path.exists(aia_dir):
+        # Load sample AIA images
+        aia_files = glob.glob(os.path.join(aia_dir, "*.npz"))
+        if aia_files:
+            sample_file = aia_files[0]
+            aia_data = np.load(sample_file)
+            # Extract available wavelengths
+            wavelengths = [key for key in aia_data.files if key.startswith('aia_')]
+
+            for wavelength in wavelengths:
+                wl_number = wavelength.split('_')[1]  # Extract wavelength number
+                data[f'sample_aia_{wl_number}'] = aia_data[wavelength]
+                print(f"Loaded AIA {wl_number}Å image from {sample_file}")
+
+        # Load AIA metadata
+        meta_file = os.path.join(aia_dir, "aia_metadata.csv")
+        if os.path.exists(meta_file):
+            data['aia_metadata'] = pd.read_csv(meta_file)
+            print(f"Loaded AIA metadata: {len(data['aia_metadata'])} entries")
+
+    # 3. Load GOES X-ray data
+    goes_dir = os.path.join(data_root, "goes_xray")
+    if os.path.exists(goes_dir):
+        flux_file = os.path.join(goes_dir, "goes_xray_flux.csv")
+        if os.path.exists(flux_file):
+            data['goes_xray_flux'] = pd.read_csv(flux_file)
+            # Convert timestamp to datetime
+            if 'timestamp' in data['goes_xray_flux'].columns:
+                data['goes_xray_flux']['timestamp'] = pd.to_datetime(data['goes_xray_flux']['timestamp'])
+            print(f"Loaded GOES X-ray flux: {len(data['goes_xray_flux'])} entries")
+
+        flare_file = os.path.join(goes_dir, "goes_flare_events.csv")
+        if os.path.exists(flare_file):
+            data['goes_flare_events'] = pd.read_csv(flare_file)
+            # Convert timestamps to datetime
+            datetime_cols = ['start_time', 'peak_time', 'end_time']
+            for col in datetime_cols:
+                if col in data['goes_flare_events'].columns:
+                    data['goes_flare_events'][col] = pd.to_datetime(data['goes_flare_events'][col])
+            print(f"Loaded GOES flare events: {len(data['goes_flare_events'])} entries")
+
+    # 4. Load SOHO data
+    soho_dir = os.path.join(data_root, "soho_data")
+    if os.path.exists(soho_dir):
+        soho_files = glob.glob(os.path.join(soho_dir, "*.npy"))
+        if soho_files:
+            data['sample_soho'] = np.load(soho_files[0])
+            print(f"Loaded SOHO image: {soho_files[0]}")
+
+        meta_file = os.path.join(soho_dir, "soho_metadata.csv")
+        if os.path.exists(meta_file):
+            data['soho_metadata'] = pd.read_csv(meta_file)
+            print(f"Loaded SOHO metadata: {len(data['soho_metadata'])} entries")
+
+    # 5. Load extracted features
+    features_dir = os.path.join(data_root, "features")
+    if os.path.exists(features_dir):
+        mag_features_file = os.path.join(features_dir, "magnetogram_features.csv")
+        if os.path.exists(mag_features_file):
+            data['magnetogram_features'] = pd.read_csv(mag_features_file)
+            # Convert timestamp to datetime
+            if 'timestamp' in data['magnetogram_features'].columns:
+                data['magnetogram_features']['timestamp'] = pd.to_datetime(data['magnetogram_features']['timestamp'])
+            print(f"Loaded magnetogram features: {len(data['magnetogram_features'])} entries")
+
+        aia_features_file = os.path.join(features_dir, "aia_features.csv")
+        if os.path.exists(aia_features_file):
+            data['aia_features'] = pd.read_csv(aia_features_file)
+            # Convert timestamp to datetime
+            if 'timestamp' in data['aia_features'].columns:
+                data['aia_features']['timestamp'] = pd.to_datetime(data['aia_features']['timestamp'])
+            print(f"Loaded AIA features: {len(data['aia_features'])} entries")
+
+    # Check if we have the necessary data
+    if not data:
+        print("Warning: No data was loaded. Please check the path and directory structure.")
+
+    return data
 
 
-# Function to load a sample AIA image
-def load_sample_aia_images():
-    wavelengths = [94, 131, 171, 193, 211, 304, 335, 1600, 1700]
-    aia_images = {}
+# Create data overview visualization
+def create_data_overview(data, filename="data_overview.png"):
+    """
+    Create a comprehensive overview of the solar data for flare prediction
 
-    np.random.seed(43)
-    for wl in wavelengths:
-        if wl < 100:  # Hot corona
-            base = np.random.exponential(1, (512, 512))
-            sigma = 3
-        elif wl < 200:  # Corona
-            base = np.random.exponential(1.5, (512, 512))
-            sigma = 4
-        elif wl < 1000:  # Transition region
-            base = np.random.exponential(2, (512, 512))
-            sigma = 5
-        else:  # Photosphere
-            base = np.random.normal(10, 2, (512, 512))
-            sigma = 2
+    Parameters:
+    data (dict): Dictionary containing loaded data
+    filename (str): Output filename
 
-        img = gaussian_filter(base, sigma=sigma)
-        for _ in range(5):
-            x = np.random.randint(100, 400)
-            y = np.random.randint(100, 400)
-            length = np.random.randint(50, 150)
-            width = np.random.randint(5, 15)
-            angle = np.random.uniform(0, 2 * np.pi)
+    Returns:
+    matplotlib.figure.Figure: The created figure
+    """
+    print("Creating data overview visualization...")
+    fig = plt.figure(figsize=(16, 12))
+    gs = gridspec.GridSpec(2, 3, height_ratios=[1, 1])
 
-            xx = np.linspace(0, length, 100)
-            yy = width * np.sin(xx / length * np.pi)
+    # Panel 1: Magnetogram (if available)
+    ax1 = plt.subplot(gs[0, 0])
+    if 'sample_magnetogram' in data:
+        magnetogram = data['sample_magnetogram']
+        vmax = np.nanpercentile(np.abs(magnetogram), 99.5)
+        im1 = ax1.imshow(magnetogram, cmap='RdBu_r', vmin=-vmax, vmax=vmax)
+        divider = make_axes_locatable(ax1)
+        cax1 = divider.append_axes("right", size="5%", pad=0.05)
+        plt.colorbar(im1, cax=cax1, label='Field Strength (Gauss)')
+    else:
+        ax1.text(0.5, 0.5, "Magnetogram data not available",
+                 ha='center', va='center', transform=ax1.transAxes)
 
-            for i, (x_val, y_val) in enumerate(zip(xx, yy)):
-                x_pos = int(x + x_val * np.cos(angle) - y_val * np.sin(angle))
-                y_pos = int(y + x_val * np.sin(angle) + y_val * np.cos(angle))
+    ax1.set_title('HMI Magnetogram')
+    ax1.set_xticks([])
+    ax1.set_yticks([])
 
-                if 0 <= x_pos < 512 and 0 <= y_pos < 512:
-                    img[y_pos, x_pos] += np.random.uniform(5, 20) * (1 - i / 100)
+    # Panel 2: AIA 171 (if available)
+    ax2 = plt.subplot(gs[0, 1])
+    if 'sample_aia_171' in data:
+        aia_171 = data['sample_aia_171']
+        # Apply log scaling with a small offset to handle zeros
+        with np.errstate(divide='ignore', invalid='ignore'):
+            log_aia = np.log10(aia_171 + 1)
 
-        aia_images[wl] = img
+        vmin, vmax = np.nanpercentile(log_aia[log_aia > 0], [1, 99.5])
+        im2 = ax2.imshow(log_aia, cmap='sdoaia171', vmin=vmin, vmax=vmax)
+        divider = make_axes_locatable(ax2)
+        cax2 = divider.append_axes("right", size="5%", pad=0.05)
+        plt.colorbar(im2, cax=cax2, label='log₁₀(Intensity) [DN/s]')
+    else:
+        ax2.text(0.5, 0.5, "AIA 171Å data not available",
+                 ha='center', va='center', transform=ax2.transAxes)
 
-    return aia_images
+    ax2.set_title('AIA 171Å (Quiet Corona)')
+    ax2.set_xticks([])
+    ax2.set_yticks([])
 
+    # Panel 3: AIA 94 (if available)
+    ax3 = plt.subplot(gs[0, 2])
+    if 'sample_aia_94' in data:
+        aia_94 = data['sample_aia_94']
+        # Apply log scaling with a small offset to handle zeros
+        with np.errstate(divide='ignore', invalid='ignore'):
+            log_aia = np.log10(aia_94 + 1)
 
-# 1. INTERACTIVE FLARE PREDICTION DASHBOARD
-# def create_flare_prediction_dashboard():
-#     flare_counts = flare_events.copy()
-#     flare_counts['date'] = flare_counts['start_time'].dt.date
-#     flare_counts['date'] = pd.to_datetime(flare_counts['date'])
-#
-#     class_counts = flare_counts.groupby(['date', 'class']).size().unstack(fill_value=0)
-#
-#     mag_daily = magnetogram_features.copy()
-#     mag_daily['date'] = mag_daily['timestamp'].dt.date
-#     mag_daily['date'] = pd.to_datetime(mag_daily['date'])
-#
-#     # Use the correct column names
-#     mag_daily_avg = mag_daily.groupby('date').agg({
-#         'total_unsigned_flux': 'mean',  # Updated column name
-#         'max_field_strength': 'mean',  # Already correct
-#         'r_value': 'mean',  # Already correct
-#         'ising_energy': 'mean'  # Use 'ising_energy' as a proxy for free energy
-#     }).reset_index()
-#
-#     # Merge datasets
-#     merged_data = pd.merge(mag_daily_avg, class_counts, on='date', how='left')
-#     merged_data = merged_data.fillna(0)
-#
-#     fig = make_subplots(
-#         rows=3, cols=2,
-#         subplot_titles=(
-#             "Daily Flare Occurrence",
-#             "Magnetic Flux vs. Flare Probability",
-#             "Free Energy Proxy Over Time",
-#             "Max Field Strength vs. R-Value",
-#             "Feature Importance for Flare Prediction",
-#             "Flare Magnitude Distribution"
-#         ),
-#         specs=[
-#             [{"type": "scatter"}, {"type": "scatter"}],
-#             [{"type": "scatter"}, {"type": "scatter"}],
-#             [{"type": "bar"}, {"type": "pie"}]
-#         ]
-#     )
-#
-#     for flare_class in ['B', 'C', 'M', 'X']:
-#         if flare_class in merged_data.columns:
-#             fig.add_trace(
-#                 go.Scatter(
-#                     x=merged_data['date'],
-#                     y=merged_data[flare_class],
-#                     mode='lines',
-#                     name=f"{flare_class}-class flares"
-#                 ),
-#                 row=1, col=1
-#             )
-#
-#     merged_data['has_flare'] = ((merged_data['B'] > 0) |
-#                                 (merged_data['C'] > 0) |
-#                                 (merged_data['M'] > 0) |
-#                                 (merged_data['X'] > 0)).astype(int)
-#
-#     bins = np.linspace(merged_data['total_flux'].min(),
-#                        merged_data['total_flux'].max(), 10)
-#     merged_data['flux_bin'] = pd.cut(merged_data['total_flux'], bins)
-#
-#     flux_prob = merged_data.groupby('flux_bin')['has_flare'].mean().reset_index()
-#     flux_prob['bin_center'] = flux_prob['flux_bin'].apply(lambda x: x.mid)
-#
-#     fig.add_trace(
-#         go.Scatter(
-#             x=flux_prob['bin_center'],
-#             y=flux_prob['has_flare'],
-#             mode='markers+lines',
-#             name='Flare Probability',
-#             marker=dict(size=10, color='orange')
-#         ),
-#         row=1, col=2
-#     )
-#
-#     fig.add_trace(
-#         go.Scatter(
-#             x=merged_data['date'],
-#             y=merged_data['free_energy_proxy'],
-#             mode='lines',
-#             name='Free Energy Proxy',
-#             line=dict(color='cyan', width=2)
-#         ),
-#         row=2, col=1
-#     )
-#
-#     for flare_class, color in zip(['X', 'M', 'C', 'B'], ['red', 'orange', 'yellow', 'green']):
-#         if flare_class in merged_data.columns:
-#             mask = merged_data[flare_class] > 0
-#             if mask.any():
-#                 fig.add_trace(
-#                     go.Scatter(
-#                         x=merged_data.loc[mask, 'date'],
-#                         y=merged_data.loc[mask, 'free_energy_proxy'],
-#                         mode='markers',
-#                         marker=dict(size=8, symbol='star', color=color),
-#                         name=f"{flare_class}-class flares",
-#                         showlegend=False
-#                     ),
-#                     row=2, col=1
-#                 )
-#
-#     fig.add_trace(
-#         go.Scatter(
-#             x=merged_data['max_field_strength'],
-#             y=merged_data['r_value'],
-#             mode='markers',
-#             marker=dict(
-#                 size=10,
-#                 color=merged_data['has_flare'],
-#                 colorscale='Viridis',
-#                 showscale=True,
-#                 colorbar=dict(title="Flare Occurred")
-#             ),
-#             name='Magnetic Parameters'
-#         ),
-#         row=2, col=2
-#     )
-#
-#     features = ['total_unsigned_flux', 'max_field_strength', 'r_value', 'ising_energy']
-#     importances = [0.35, 0.25, 0.18, 0.22]  # Adjust importance values as needed
-#
-#     fig.add_trace(
-#         go.Bar(
-#             x=features,
-#             y=importances,
-#             marker_color='lightgreen',
-#             name='Feature Importance'
-#         ),
-#         row=3, col=1
-#     )
-#
-#     class_counts = flare_events['class'].value_counts()
-#     fig.add_trace(
-#         go.Pie(
-#             labels=class_counts.index,
-#             values=class_counts.values,
-#             name='Flare Classes',
-#             marker=dict(colors=['green', 'yellow', 'orange', 'red'])
-#         ),
-#         row=3, col=2
-#     )
-#
-#     fig.update_layout(
-#         title_text="Solar Flare Prediction Dashboard",
-#         height=900,
-#         width=1200,
-#         template="plotly_dark",
-#         showlegend=True
-#     )
-#
-#     fig.update_xaxes(title_text="Date", row=1, col=1)
-#     fig.update_yaxes(title_text="Number of Flares", row=1, col=1)
-#
-#     fig.update_xaxes(title_text="Total Magnetic Flux (Maxwells)", row=1, col=2)
-#     fig.update_yaxes(title_text="Flare Probability", row=1, col=2)
-#
-#     fig.update_xaxes(title_text="Date", row=2, col=1)
-#     fig.update_yaxes(title_text="Free Energy Proxy", row=2, col=1)
-#
-#     fig.update_xaxes(title_text="Max Field Strength (Gauss)", row=2, col=2)
-#     fig.update_yaxes(title_text="R-Value", row=2, col=2)
-#
-#     fig.update_xaxes(title_text="Feature", row=3, col=1)
-#     fig.update_yaxes(title_text="Importance", row=3, col=1)
-#
-#     return fig
+        vmin, vmax = np.nanpercentile(log_aia[log_aia > 0], [1, 99.5])
+        im3 = ax3.imshow(log_aia, cmap='sdoaia94', vmin=vmin, vmax=vmax)
+        divider = make_axes_locatable(ax3)
+        cax3 = divider.append_axes("right", size="5%", pad=0.05)
+        plt.colorbar(im3, cax=cax3, label='log₁₀(Intensity) [DN/s]')
+    elif 'sample_aia_131' in data:  # Try 131Å as alternative
+        aia_131 = data['sample_aia_131']
+        # Apply log scaling with a small offset to handle zeros
+        with np.errstate(divide='ignore', invalid='ignore'):
+            log_aia = np.log10(aia_131 + 1)
 
-def create_flare_prediction_dashboard():
-    flare_counts = flare_events.copy()
-    flare_counts['date'] = flare_counts['start_time'].dt.date
-    flare_counts['date'] = pd.to_datetime(flare_counts['date'])
+        vmin, vmax = np.nanpercentile(log_aia[log_aia > 0], [1, 99.5])
+        im3 = ax3.imshow(log_aia, cmap='sdoaia131', vmin=vmin, vmax=vmax)
+        divider = make_axes_locatable(ax3)
+        cax3 = divider.append_axes("right", size="5%", pad=0.05)
+        plt.colorbar(im3, cax=cax3, label='log₁₀(Intensity) [DN/s]')
+        ax3.set_title('AIA 131Å (Hot Corona)')
+    else:
+        ax3.text(0.5, 0.5, "AIA 94/131Å data not available",
+                 ha='center', va='center', transform=ax3.transAxes)
+        ax3.set_title('AIA 94Å (Hot Corona)')
 
-    # Ensure all flare classes are present
-    possible_classes = ['B', 'C', 'M', 'X']
-    class_counts = flare_counts.groupby(['date', 'class']).size().unstack(fill_value=0)
-    class_counts = class_counts.reindex(columns=possible_classes, fill_value=0)  # Add missing classes
+    ax3.set_xticks([])
+    ax3.set_yticks([])
 
-    mag_daily = magnetogram_features.copy()
-    mag_daily['date'] = mag_daily['timestamp'].dt.date
-    mag_daily['date'] = pd.to_datetime(mag_daily['date'])
+    # Panel 4: GOES X-ray flux (if available)
+    ax4 = plt.subplot(gs[1, :2])
+    if 'goes_xray_flux' in data and len(data['goes_xray_flux']) > 0:
+        goes_data = data['goes_xray_flux']
 
-    mag_daily_avg = mag_daily.groupby('date').agg({
-        'total_unsigned_flux': 'mean',
-        'max_field_strength': 'mean',
-        'r_value': 'mean',
-        'ising_energy': 'mean'
-    }).reset_index()
+        # Plot only a subset of data points if there are too many
+        if len(goes_data) > 1000:
+            sample_rate = max(1, len(goes_data) // 1000)
+            goes_data = goes_data.iloc[::sample_rate].copy()
 
-    merged_data = pd.merge(mag_daily_avg, class_counts, on='date', how='left')
-    merged_data = merged_data.fillna(0)
+        # Plot both channels if available
+        if 'xray_long' in goes_data.columns:
+            ax4.semilogy(goes_data['timestamp'], goes_data['xray_long'], label='Long (1-8Å)')
+        if 'xray_short' in goes_data.columns:
+            ax4.semilogy(goes_data['timestamp'], goes_data['xray_short'], label='Short (0.5-4Å)')
 
-    # Rest of the function remains the same...
+        # Add flare classifications
+        ax4.axhline(y=1e-8, color='k', linestyle='--', alpha=0.3)
+        ax4.text(goes_data['timestamp'].iloc[0], 5e-9, 'A', verticalalignment='center')
 
-    # Create figures
-    fig = make_subplots(
-        rows=3, cols=2,
-        subplot_titles=(
-            "Daily Flare Occurrence",
-            "Magnetic Flux vs. Flare Probability",
-            "Free Energy Proxy Over Time",
-            "Max Field Strength vs. R-Value",
-            "Feature Importance for Flare Prediction",
-            "Flare Magnitude Distribution"
-        ),
-        specs=[
-            [{"type": "scatter"}, {"type": "scatter"}],
-            [{"type": "scatter"}, {"type": "scatter"}],
-            [{"type": "bar"}, {"type": "pie"}]
-        ]
-    )
+        ax4.axhline(y=1e-7, color='k', linestyle='--', alpha=0.3)
+        ax4.text(goes_data['timestamp'].iloc[0], 5e-8, 'B', verticalalignment='center')
 
-    # 1. Daily Flare Occurrence
-    for flare_class in ['B', 'C', 'M', 'X']:
-        if flare_class in merged_data.columns:
-            fig.add_trace(
-                go.Scatter(
-                    x=merged_data['date'],
-                    y=merged_data[flare_class],
-                    mode='lines',
-                    name=f"{flare_class}-class flares"
-                ),
-                row=1, col=1
-            )
+        ax4.axhline(y=1e-6, color='k', linestyle='--', alpha=0.3)
+        ax4.text(goes_data['timestamp'].iloc[0], 5e-7, 'C', verticalalignment='center')
 
-    # 2. Magnetic Flux vs. Flare Probability
-    merged_data['has_flare'] = ((merged_data['B'] > 0) |
-                                (merged_data['C'] > 0) |
-                                (merged_data['M'] > 0) |
-                                (merged_data['X'] > 0)).astype(int)
+        ax4.axhline(y=1e-5, color='k', linestyle='--', alpha=0.3)
+        ax4.text(goes_data['timestamp'].iloc[0], 5e-6, 'M', verticalalignment='center')
 
-    bins = np.linspace(merged_data['total_unsigned_flux'].min(),
-                       merged_data['total_unsigned_flux'].max(), 10)
-    merged_data['flux_bin'] = pd.cut(merged_data['total_unsigned_flux'], bins)
+        ax4.axhline(y=1e-4, color='k', linestyle='--', alpha=0.3)
+        ax4.text(goes_data['timestamp'].iloc[0], 5e-5, 'X', verticalalignment='center')
 
-    flux_prob = merged_data.groupby('flux_bin')['has_flare'].mean().reset_index()
-    flux_prob['bin_center'] = flux_prob['flux_bin'].apply(lambda x: x.mid)
+        # Mark flares if available
+        if 'goes_flare_events' in data and len(data['goes_flare_events']) > 0:
+            flare_catalog = data['goes_flare_events']
 
-    fig.add_trace(
-        go.Scatter(
-            x=flux_prob['bin_center'],
-            y=flux_prob['has_flare'],
-            mode='markers+lines',
-            name='Flare Probability',
-            marker=dict(size=10, color='orange')
-        ),
-        row=1, col=2
-    )
+            for _, flare in flare_catalog.iterrows():
+                if hasattr(flare, 'start_time') and hasattr(flare, 'end_time'):
+                    ax4.axvspan(flare['start_time'], flare['end_time'], alpha=0.2, color='red')
 
-    # 3. Free Energy Proxy Over Time
-    fig.add_trace(
-        go.Scatter(
-            x=merged_data['date'],
-            y=merged_data['ising_energy'],
-            mode='lines',
-            name='Free Energy Proxy (Ising Energy)',
-            line=dict(color='cyan', width=2)
-        ),
-        row=2, col=1
-    )
+                if hasattr(flare, 'peak_time') and hasattr(flare, 'peak_flux'):
+                    if hasattr(flare, 'class'):
+                        ax4.text(flare['peak_time'], flare['peak_flux'] * 1.5, flare['class'],
+                                 horizontalalignment='center', color='red')
+                    else:
+                        ax4.axvline(flare['peak_time'], color='red', linestyle='-', alpha=0.7)
+    else:
+        ax4.text(0.5, 0.5, "GOES X-ray flux data not available",
+                 ha='center', va='center', transform=ax4.transAxes)
 
-    # Add flare occurrences as markers
-    for flare_class, color in zip(['X', 'M', 'C', 'B'], ['red', 'orange', 'yellow', 'green']):
-        if flare_class in merged_data.columns:
-            mask = merged_data[flare_class] > 0
-            if mask.any():
-                fig.add_trace(
-                    go.Scatter(
-                        x=merged_data.loc[mask, 'date'],
-                        y=merged_data.loc[mask, 'ising_energy'],
-                        mode='markers',
-                        marker=dict(size=8, symbol='star', color=color),
-                        name=f"{flare_class}-class flares",
-                        showlegend=False
-                    ),
-                    row=2, col=1
+    ax4.set_title('GOES X-ray Flux and Flare Events')
+    ax4.set_ylabel('X-ray Flux [W/m²]')
+    ax4.set_xlabel('Date')
+    ax4.legend(loc='upper right')
+    ax4.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    ax4.grid(True, which='both', linestyle='--', alpha=0.5)
+
+    # Panel 5: Features correlation (if available)
+    ax5 = plt.subplot(gs[1, 2])
+    if ('magnetogram_features' in data and len(data['magnetogram_features']) > 0 and
+            'has_flare' in data['magnetogram_features'].columns):
+        features = data['magnetogram_features']
+
+        # Find useful columns for plotting
+        numerical_cols = features.select_dtypes(include=[np.number]).columns.tolist()
+
+        # Remove timestamp, has_flare, etc. from potential x, y columns
+        exclude_cols = ['timestamp', 'has_flare', 'next_flare_magnitude', 'time_to_next_flare']
+        plot_cols = [col for col in numerical_cols if col not in exclude_cols]
+
+        if len(plot_cols) >= 2:
+            x_col = plot_cols[0]  # Use first available feature column for x-axis
+            y_col = plot_cols[1]  # Use second available feature column for y-axis
+
+            features_before_flare = features[features['has_flare'] == 1]
+
+            if len(features_before_flare) > 0 and 'next_flare_magnitude' in features.columns:
+                scatter = ax5.scatter(
+                    features_before_flare[x_col],
+                    features_before_flare[y_col],
+                    c=features_before_flare['next_flare_magnitude'],
+                    cmap='plasma',
+                    s=50, alpha=0.7
                 )
 
-    # 4. Max Field Strength vs. R-Value scatter
-    fig.add_trace(
-        go.Scatter(
-            x=merged_data['max_field_strength'],
-            y=merged_data['r_value'],
-            mode='markers',
-            marker=dict(
-                size=10,
-                color=merged_data['has_flare'],
-                colorscale='Viridis',
-                showscale=True,
-                colorbar=dict(title="Flare Occurred")
-            ),
-            name='Magnetic Parameters'
-        ),
-        row=2, col=2
-    )
+                cbar = plt.colorbar(scatter, ax=ax5)
+                cbar.set_label('Flare Magnitude')
+            else:
+                # If no flare magnitude data, just show relation between features
+                ax5.scatter(features[x_col], features[y_col], alpha=0.7)
 
-    # 5. Feature Importance (simulated for this example)
-    features = ['total_unsigned_flux', 'max_field_strength', 'r_value', 'ising_energy']
-    importances = [0.35, 0.25, 0.18, 0.22]  # Simulated values
+            ax5.set_title('Magnetic Features vs Flare Magnitude')
+            ax5.set_xlabel(x_col.replace('_', ' ').title())
+            ax5.set_ylabel(y_col.replace('_', ' ').title())
 
-    fig.add_trace(
-        go.Bar(
-            x=features,
-            y=importances,
-            marker_color='lightgreen',
-            name='Feature Importance'
-        ),
-        row=3, col=1
-    )
+            # Use log scales if data spans multiple orders of magnitude
+            if features[x_col].max() / (features[x_col].min() + 1e-10) > 100:
+                ax5.set_xscale('log')
+            if features[y_col].max() / (features[y_col].min() + 1e-10) > 100:
+                ax5.set_yscale('log')
+        else:
+            ax5.text(0.5, 0.5, "Not enough numerical feature columns",
+                     ha='center', va='center', transform=ax5.transAxes)
+    else:
+        ax5.text(0.5, 0.5, "Magnetogram features not available",
+                 ha='center', va='center', transform=ax5.transAxes)
 
-    # 6. Flare Magnitude Distribution
-    class_counts = flare_events['class'].value_counts()
-    fig.add_trace(
-        go.Pie(
-            labels=class_counts.index,
-            values=class_counts.values,
-            name='Flare Classes',
-            marker=dict(colors=['green', 'yellow', 'orange', 'red'])
-        ),
-        row=3, col=2
-    )
+    # Add summary text
+    plt.figtext(0.5, 0.01,
+                "This visualization shows the key data products used for solar flare prediction:\n" +
+                "Magnetograms (left), EUV images from SDO/AIA (center), and the extracted features correlated with flare activity (right).",
+                ha="center", fontsize=12, bbox={"facecolor": "lightgray", "alpha": 0.5, "pad": 5})
 
-    # Update layout
-    fig.update_layout(
-        title_text="Solar Flare Prediction Dashboard",
-        height=900,
-        width=1200,
-        template="plotly_dark",
-        showlegend=True
-    )
+    plt.tight_layout(rect=[0, 0.03, 1, 0.97])
+    plt.suptitle("Solar Data for Flare Prediction", fontsize=16, y=0.98)
 
-    # Update axis labels
-    fig.update_xaxes(title_text="Date", row=1, col=1)
-    fig.update_yaxes(title_text="Number of Flares", row=1, col=1)
-
-    fig.update_xaxes(title_text="Total Magnetic Flux (Maxwells)", row=1, col=2)
-    fig.update_yaxes(title_text="Flare Probability", row=1, col=2)
-
-    fig.update_xaxes(title_text="Date", row=2, col=1)
-    fig.update_yaxes(title_text="Ising Energy (Free Energy Proxy)", row=2, col=1)
-
-    fig.update_xaxes(title_text="Max Field Strength (Gauss)", row=2, col=2)
-    fig.update_yaxes(title_text="R-Value", row=2, col=2)
-
-    fig.update_xaxes(title_text="Feature", row=3, col=1)
-    fig.update_yaxes(title_text="Importance", row=3, col=1)
+    # Save the figure
+    plt.savefig(os.path.join(output_dir, filename), dpi=300, bbox_inches='tight')
+    print(f"Saved {filename}")
 
     return fig
 
 
-# 2. MULTI-WAVELENGTH AIA VISUALIZATION
-def create_multiwavelength_aia_viz():
-    aia_images = load_sample_aia_images()
-    wavelengths = list(aia_images.keys())
+# Create data preprocessing workflow visualization
+def create_preprocessing_workflow(data, filename="preprocessing_workflow.png"):
+    """
+    Create a visualization of the data preprocessing workflow
 
-    fig, axes = plt.subplots(3, 3, figsize=(15, 15))
-    axes = axes.flatten()
+    Parameters:
+    data (dict): Dictionary containing loaded data
+    filename (str): Output filename
 
-    colormaps = {
-        94: 'hot',
-        131: 'pink',
-        171: 'bone',
-        193: 'viridis',
-        211: 'plasma',
-        304: 'copper',
-        335: 'magma',
-        1600: 'inferno',
-        1700: 'cividis'
-    }
+    Returns:
+    matplotlib.figure.Figure: The created figure
+    """
+    print("Creating preprocessing workflow visualization...")
+    fig = plt.figure(figsize=(14, 12))
 
-    for i, wl in enumerate(sorted(wavelengths)):
-        img = aia_images[wl]
-        im = axes[i].imshow(
-            img,
-            cmap=colormaps.get(wl, 'gray'),
-            norm=LogNorm(vmin=max(img.min(), 0.01), vmax=img.max())
-        )
-        axes[i].set_title(f"{wl} Å")
-        plt.colorbar(im, ax=axes[i], fraction=0.046, pad=0.04)
-        axes[i].axis('off')
+    # 1. Raw data
+    gs = gridspec.GridSpec(3, 3)
 
-    plt.tight_layout()
-    plt.suptitle("Multi-Wavelength AIA Observations", fontsize=20, y=1.02)
+    # Check if we have the necessary data
+    has_magnetogram = 'sample_magnetogram' in data
+    has_aia = any(key.startswith('sample_aia_') for key in data.keys())
+    has_goes = 'goes_xray_flux' in data and len(data['goes_xray_flux']) > 0
 
-    return fig
+    # Raw magnetogram
+    ax1 = plt.subplot(gs[0, 0])
+    if has_magnetogram:
+        # Original magnetogram
+        raw_magnetogram = data['sample_magnetogram'].copy()
 
+        # Create a "raw" version by adding noise and missing data
+        raw_magnetogram = raw_magnetogram + np.random.normal(0, np.nanstd(raw_magnetogram) / 5, raw_magnetogram.shape)
 
-# 3. 3D MAGNETOGRAM VISUALIZATION
-def create_3d_magnetogram_viz():
-    magnetogram = load_sample_magnetogram()
+        # Add some missing data (NaN values) in random locations
+        mask = np.random.random(raw_magnetogram.shape) > 0.98
+        raw_magnetogram[mask] = np.nan
 
-    fig = plt.figure(figsize=(12, 10))
-    ax = fig.add_subplot(111, projection='3d')
+        vmax = np.nanpercentile(np.abs(raw_magnetogram), 99.5)
+        im1 = ax1.imshow(raw_magnetogram, cmap='RdBu_r', vmin=-vmax, vmax=vmax)
+    else:
+        ax1.text(0.5, 0.5, "Magnetogram data not available",
+                 ha='center', va='center', transform=ax1.transAxes)
 
-    x = np.arange(0, magnetogram.shape[1])
-    y = np.arange(0, magnetogram.shape[0])
-    x, y = np.meshgrid(x, y)
+    ax1.set_title('1. Raw Magnetogram')
+    ax1.set_xticks([])
+    ax1.set_yticks([])
 
-    magnetogram_smooth = gaussian_filter(magnetogram, sigma=2)
+    # Raw AIA with artifacts
+    ax2 = plt.subplot(gs[0, 1])
+    if has_aia:
+        # Find the first available AIA wavelength
+        aia_key = next((key for key in data.keys() if key.startswith('sample_aia_')), None)
+        if aia_key:
+            raw_aia = data[aia_key].copy()
+            wavelength = aia_key.split('_')[-1]
 
-    z = np.zeros_like(magnetogram_smooth)
+            # Add cosmic ray hits and bad pixels
+            cosmic_ray_mask = np.random.random(raw_aia.shape) > 0.998
+            raw_aia[cosmic_ray_mask] = np.nanmax(raw_aia) * 5
 
-    surf = ax.plot_surface(
-        x, y, z,
-        facecolors=cm.seismic(
-            (magnetogram_smooth - magnetogram_smooth.min()) /
-            (magnetogram_smooth.max() - magnetogram_smooth.min())
-        ),
-        linewidth=0,
-        antialiased=False,
-        rstride=5,
-        cstride=5
-    )
+            # Add a CCD blemish or streak
+            y_streak = np.random.randint(100, raw_aia.shape[0] - 100)
+            raw_aia[y_streak:y_streak + 5, :] = 0
 
-    threshold = 150  # Gauss
-    sources_pos = (magnetogram > threshold)
-    sources_neg = (magnetogram < -threshold)
+            # Apply log scaling with a small offset to handle zeros
+            with np.errstate(divide='ignore', invalid='ignore'):
+                log_aia = np.log10(raw_aia + 1)
 
-    pos_points = np.array(np.where(sources_pos)).T
-    neg_points = np.array(np.where(sources_neg)).T
+            vmin, vmax = np.nanpercentile(log_aia[log_aia > 0], [1, 99.5])
+            cmap_name = f'sdoaia{wavelength}' if f'sdoaia{wavelength}' in plt.colormaps() else 'viridis'
+            im2 = ax2.imshow(log_aia, cmap=cmap_name, vmin=vmin, vmax=vmax)
 
-    if len(pos_points) > 0 and len(neg_points) > 0:
-        np.random.seed(42)
-        if len(pos_points) > 30:
-            pos_idx = np.random.choice(len(pos_points), 30, replace=False)
-            pos_points = pos_points[pos_idx]
+            ax2.set_title(f'1. Raw AIA {wavelength}Å Image')
+        else:
+            ax2.text(0.5, 0.5, "AIA image data not available",
+                     ha='center', va='center', transform=ax2.transAxes)
+    else:
+        ax2.text(0.5, 0.5, "AIA image data not available",
+                 ha='center', va='center', transform=ax2.transAxes)
 
-        if len(neg_points) > 30:
-            neg_idx = np.random.choice(len(neg_points), 30, replace=False)
-            neg_points = neg_points[neg_idx]
+    ax2.set_xticks([])
+    ax2.set_yticks([])
 
-        for i, pos in enumerate(pos_points):
-            for j, neg in enumerate(neg_points):
-                if (i + j) % 10 == 0:
-                    x_line = np.linspace(pos[1], neg[1], 20)
-                    y_line = np.linspace(pos[0], neg[0], 20)
-                    dist = np.sqrt((pos[0] - neg[0]) ** 2 + (pos[1] - neg[1]) ** 2)
-                    max_height = min(dist / 2, 100)
-                    z_line = max_height * np.sin(np.linspace(0, np.pi, 20))
-                    ax.plot(x_line, y_line, z_line, 'yellow', linewidth=1.5, alpha=0.7)
+    # Raw GOES data with gaps
+    ax3 = plt.subplot(gs[0, 2])
+    if has_goes:
+        raw_goes = data['goes_xray_flux'].copy()
 
-    ax.set_axis_off()
-    ax.set_title("3D Magnetogram Visualization", fontsize=20, pad=30)
-    ax.view_init(elev=30, azim=45)
+        # Create a subset if too many data points
+        if len(raw_goes) > 1000:
+            sample_rate = max(1, len(raw_goes) // 1000)
+            raw_goes = raw_goes.iloc[::sample_rate].reset_index(drop=True)
 
-    sm = plt.cm.ScalarMappable(cmap=cm.seismic)
-    sm.set_array(magnetogram)
-    cbar = plt.colorbar(sm, ax=ax, pad=0.1)
-    cbar.set_label('Magnetic Field Strength (Gauss)', fontsize=14)
+        # Create some artificial data gaps
+        gap_indices = np.random.choice(len(raw_goes), size=min(5, len(raw_goes) // 10), replace=False)
+        if 'xray_long' in raw_goes.columns:
+            raw_goes.loc[gap_indices, 'xray_long'] = np.nan
+        if 'xray_short' in raw_goes.columns:
+            raw_goes.loc[gap_indices, 'xray_short'] = np.nan
 
-    return fig
+        if 'xray_long' in raw_goes.columns:
+            ax3.semilogy(raw_goes['timestamp'], raw_goes['xray_long'], 'b.', label='Long (raw)')
+        if 'xray_short' in raw_goes.columns:
+            ax3.semilogy(raw_goes['timestamp'], raw_goes['xray_short'], 'g.', label='Short (raw)')
+    else:
+        ax3.text(0.5, 0.5, "GOES X-ray data not available",
+                 ha='center', va='center', transform=ax3.transAxes)
 
+    ax3.set_title('1. Raw GOES X-ray Data')
+    ax3.legend(fontsize=8)
+    ax3.set_xticks([])
+    ax3.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    ax3.grid(True, which='both', linestyle='--', alpha=0.3)
 
-# 4. GOES X-RAY FLUX AND FLARE PREDICTION
-def create_xray_prediction_viz():
-    end_date = goes_flux['timestamp'].max()
-    start_date = end_date - datetime.timedelta(days=30)
+    # 2. Intermediate processing
+    # Cleaned magnetogram
+    ax4 = plt.subplot(gs[1, 0])
+    if has_magnetogram:
+        # Apply processing: fill missing values and smooth slightly
+        from scipy.ndimage import gaussian_filter
+        cleaned_magnetogram = np.copy(raw_magnetogram)
+        mask = np.isnan(cleaned_magnetogram)
 
-    recent_flux = goes_flux[goes_flux['timestamp'] >= start_date].copy()
-    recent_events = flare_events[flare_events['start_time'] >= start_date].copy()
-
-    fig, ax1 = plt.subplots(figsize=(14, 8))
-
-    ax1.semilogy(recent_flux['timestamp'], recent_flux['xray_long'], 'b-',
-                 linewidth=1.5, label='GOES Long (0.1-0.8 nm)')
-    ax1.semilogy(recent_flux['timestamp'], recent_flux['xray_short'], 'c-',
-                 linewidth=1.5, label='GOES Short (0.05-0.4 nm)')
-
-    colors = {'B': 'green', 'C': 'yellow', 'M': 'orange', 'X': 'red'}
-    markers = {'B': 'o', 'C': 's', 'M': '^', 'X': '*'}
-    sizes = {'B': 50, 'C': 100, 'M': 200, 'X': 300}
-
-    for _, flare in recent_events.iterrows():
-        ax1.scatter(
-            flare['peak_time'],
-            flare['peak_flux'],
-            color=colors.get(flare['class'], 'gray'),
-            marker=markers.get(flare['class'], 'o'),
-            s=sizes.get(flare['class'], 50),
-            edgecolor='white',
-            zorder=10,
-            label=f"{flare['class']}-class flare"
+        # Fill NaN values with local neighborhood mean
+        from scipy.ndimage import uniform_filter
+        neighborhood = uniform_filter(np.where(~mask, cleaned_magnetogram, 0), size=3)
+        neighborhood_count = uniform_filter(~mask, size=3)
+        cleaned_magnetogram = np.where(
+            mask & (neighborhood_count > 0),
+            neighborhood / (neighborhood_count + 1e-10),
+            cleaned_magnetogram
         )
 
-    ax2 = ax1.twinx()
+        # Apply mild smoothing
+        cleaned_magnetogram = gaussian_filter(np.nan_to_num(cleaned_magnetogram), sigma=1)
 
-    recent_mag = magnetogram_features[
-        magnetogram_features['timestamp'] >= start_date
-        ].copy()
+        vmax = np.nanpercentile(np.abs(cleaned_magnetogram), 99.5)
+        im4 = ax4.imshow(cleaned_magnetogram, cmap='RdBu_r', vmin=-vmax, vmax=vmax)
+    else:
+        ax4.text(0.5, 0.5, "Magnetogram data not available",
+                 ha='center', va='center', transform=ax4.transAxes)
 
-    recent_mag['flare_prob'] = (
-            (recent_mag['ising_energy'] / recent_mag['ising_energy'].max() * 0.5) +
-            (recent_mag['r_value'] / recent_mag['r_value'].max() * 0.3) +
-            (recent_mag['max_field_strength'] / recent_mag['max_field_strength'].max() * 0.2)
-    )
+    ax4.set_title('2. Cleaned & Calibrated')
+    ax4.set_xticks([])
+    ax4.set_yticks([])
 
-    np.random.seed(42)
-    recent_mag['flare_prob'] += np.random.normal(0, 0.05, len(recent_mag))
-    recent_mag['flare_prob'] = np.clip(recent_mag['flare_prob'], 0, 1)
+    # Cleaned AIA
+    ax5 = plt.subplot(gs[1, 1])
+    if has_aia and 'raw_aia' in locals() and aia_key:
+        cleaned_aia = np.copy(raw_aia)
 
-    ax2.plot(recent_mag['timestamp'], recent_mag['flare_prob'], 'r--',
-             linewidth=2, label='24h Flare Probability')
+        # Remove cosmic rays with a median filter
+        from scipy.ndimage import median_filter
+        cleaned_aia = median_filter(cleaned_aia, size=3)
 
-    high_risk = recent_mag[recent_mag['flare_prob'] > 0.6]
-    if not high_risk.empty:
-        ax2.fill_between(
-            high_risk['timestamp'],
-            0.6,
-            high_risk['flare_prob'],
-            color='red',
-            alpha=0.3,
-            label='High Flare Risk'
+        # Fill in bad CCD streak with neighborhood average
+        for i in range(y_streak, min(y_streak + 5, cleaned_aia.shape[0])):
+            if i > 0 and i < cleaned_aia.shape[0] - 1:
+                cleaned_aia[i, :] = (cleaned_aia[i - 1, :] + cleaned_aia[min(i + 1, cleaned_aia.shape[0] - 1), :]) / 2
+
+        # Apply log scaling with a small offset to handle zeros
+        with np.errstate(divide='ignore', invalid='ignore'):
+            log_aia = np.log10(cleaned_aia + 1)
+
+        vmin, vmax = np.nanpercentile(log_aia[log_aia > 0], [1, 99.5])
+        im5 = ax5.imshow(log_aia, cmap=cmap_name, vmin=vmin, vmax=vmax)
+    else:
+        ax5.text(0.5, 0.5, "AIA image data not available",
+                 ha='center', va='center', transform=ax5.transAxes)
+
+    ax5.set_title('2. Despiked & Calibrated')
+    ax5.set_xticks([])
+    ax5.set_yticks([])
+
+    # Cleaned GOES data
+    ax6 = plt.subplot(gs[1, 2])
+    if has_goes and 'raw_goes' in locals():
+        cleaned_goes = raw_goes.copy()
+
+        # Fill in gaps with interpolated values
+        if 'xray_long' in cleaned_goes.columns:
+            cleaned_goes['xray_long'] = cleaned_goes['xray_long'].interpolate()
+        if 'xray_short' in cleaned_goes.columns:
+            cleaned_goes['xray_short'] = cleaned_goes['xray_short'].interpolate()
+
+        if 'xray_long' in cleaned_goes.columns:
+            ax6.semilogy(cleaned_goes['timestamp'], cleaned_goes['xray_long'], 'b-', label='Long (interpolated)')
+        if 'xray_short' in cleaned_goes.columns:
+            ax6.semilogy(cleaned_goes['timestamp'], cleaned_goes['xray_short'], 'g-', label='Short (interpolated)')
+    else:
+        ax6.text(0.5, 0.5, "GOES X-ray data not available",
+                 ha='center', va='center', transform=ax6.transAxes)
+
+    ax6.set_title('2. Gap-filled & Calibrated')
+    ax6.legend(fontsize=8)
+    ax6.set_xticks([])
+    ax6.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    ax6.grid(True, which='both', linestyle='--', alpha=0.3)
+
+    # 3. Final processed data and features
+    # Feature extraction from magnetogram
+    ax7 = plt.subplot(gs[2, 0])
+    if has_magnetogram and 'cleaned_magnetogram' in locals():
+        # Calculate magnetic field gradient for visualization
+        from scipy.ndimage import gaussian_gradient_magnitude
+        gradient = gaussian_gradient_magnitude(cleaned_magnetogram, sigma=2)
+
+        # Highlight polarity inversion lines
+        polarity_mask = np.zeros_like(cleaned_magnetogram)
+        polarity_mask[cleaned_magnetogram > 50] = 1
+        polarity_mask[cleaned_magnetogram < -50] = -1
+
+        # Create visualization with extracted features
+        feature_viz = np.zeros((*cleaned_magnetogram.shape, 3))
+
+        # Red channel: gradient magnitude (normalized)
+        feature_viz[:, :, 0] = gradient / np.nanmax(gradient)
+
+        # Green channel: positive polarity regions
+        feature_viz[:, :, 1] = (polarity_mask > 0).astype(float) * 0.7
+
+        # Blue channel: negative polarity regions
+        feature_viz[:, :, 2] = (polarity_mask < 0).astype(float) * 0.7
+
+        ax7.imshow(feature_viz)
+
+        # Annotate key features
+        ax7.text(0.05, 0.05, "PIL", color='white', transform=ax7.transAxes)
+        ax7.text(0.05, 0.10, "Gradient", color='red', transform=ax7.transAxes)
+        ax7.text(0.05, 0.15, "Pos. Polarity", color='green', transform=ax7.transAxes)
+        ax7.text(0.05, 0.20, "Neg. Polarity", color='blue', transform=ax7.transAxes)
+    else:
+        ax7.text(0.5, 0.5, "Magnetogram data not available",
+                 ha='center', va='center', transform=ax7.transAxes)
+
+    ax7.set_title('3. Feature Extraction')
+    ax7.set_xticks([])
+    ax7.set_yticks([])
+
+    # Feature extraction from AIA
+    ax8 = plt.subplot(gs[2, 1])
+    if has_aia and 'cleaned_aia' in locals():
+        # Apply brightness thresholds to detect bright regions
+        threshold_bright = np.nanpercentile(cleaned_aia, 95)
+        bright_regions = cleaned_aia > threshold_bright
+
+        # Calculate spatial gradient for loop structures
+        from scipy.ndimage import gaussian_gradient_magnitude
+        loop_structures = gaussian_gradient_magnitude(np.log1p(cleaned_aia), sigma=2)
+        loop_structures = loop_structures / np.nanmax(loop_structures)
+
+        # Create visualization with extracted features
+        feature_viz = np.zeros((*cleaned_aia.shape, 3))
+
+        # Red channel: bright regions
+        feature_viz[:, :, 0] = bright_regions.astype(float)
+
+        # Green channel: loop structures
+        feature_viz[:, :, 1] = loop_structures
+
+        # Blue channel: original intensity (normalized)
+        norm_intensity = np.log1p(cleaned_aia)
+        feature_viz[:, :, 2] = norm_intensity / np.nanmax(norm_intensity)
+
+        ax8.imshow(feature_viz)
+
+        # Annotate key features
+        ax8.text(0.05, 0.05, "Bright points", color='red', transform=ax8.transAxes)
+        ax8.text(0.05, 0.10, "Loop structures", color='green', transform=ax8.transAxes)
+        ax8.text(0.05, 0.15, "Base intensity", color='blue', transform=ax8.transAxes)
+    else:
+        ax8.text(0.5, 0.5, "AIA image data not available",
+                 ha='center', va='center', transform=ax8.transAxes)
+
+    ax8.set_title('3. Feature Extraction')
+    ax8.set_xticks([])
+    ax8.set_yticks([])
+
+    # Flare prediction from GOES data
+    ax9 = plt.subplot(gs[2, 2])
+    if has_goes and 'cleaned_goes' in locals():
+        # Create sample output data for flare prediction visualization
+        timestamps = cleaned_goes['timestamp']
+
+        # Create synthetic flare probability
+        flare_prob = np.zeros(len(timestamps))
+
+        # Find peaks in the data to set higher probabilities there
+        if 'xray_long' in cleaned_goes.columns:
+            xray_data = cleaned_goes['xray_long'].values
+            from scipy.signal import find_peaks
+            peaks, _ = find_peaks(xray_data, height=np.nanpercentile(xray_data, 80), distance=20)
+
+            # Increase probability around peak times
+            for peak in peaks:
+                # Create a Gaussian-like probability profile around each peak
+                idx_range = np.arange(max(0, peak - 10), min(len(flare_prob), peak + 10))
+                dist_from_peak = np.abs(idx_range - peak)
+                flare_prob[idx_range] = np.maximum(
+                    flare_prob[idx_range],
+                    np.exp(-0.1 * dist_from_peak) * 0.9  # Max probability of 0.9
+                )
+
+        # Plot flare probability
+        ax9.plot(timestamps, flare_prob, 'r-', lw=2, label='Flare Probability')
+        ax9.set_ylim(0, 1)
+
+        # Add a few labeled events
+        if len(peaks) > 0:
+            for i, peak in enumerate(peaks[:3]):  # Show first 3 peaks only
+                if peak < len(timestamps):
+                    peak_time = timestamps.iloc[peak]
+                    peak_prob = flare_prob[peak]
+                    ax9.axvline(peak_time, color='gray', linestyle='--', alpha=0.5)
+                    ax9.text(peak_time, peak_prob + 0.05, f"Predicted\nFlare", ha='center', fontsize=8)
+
+        # Add GOES flux for reference (scaled to fit)
+        if 'xray_long' in cleaned_goes.columns:
+            # Normalize the log of the flux to 0-0.5 range for comparison
+            log_flux = np.log10(cleaned_goes['xray_long'].values)
+            min_log, max_log = np.nanmin(log_flux), np.nanmax(log_flux)
+            scaled_flux = 0.5 * (log_flux - min_log) / (max_log - min_log)
+            ax9.plot(timestamps, scaled_flux, 'b-', alpha=0.5, label='GOES Flux (scaled)')
+    else:
+        ax9.text(0.5, 0.5, "GOES X-ray data not available",
+                 ha='center', va='center', transform=ax9.transAxes)
+
+    ax9.set_title('3. Flare Prediction')
+    ax9.set_ylim(0, 1.05)
+    ax9.set_xlabel('Time')
+    ax9.set_ylabel('Flare Probability')
+    ax9.legend(fontsize=8, loc='upper left')
+    ax9.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    ax9.grid(True, linestyle='--', alpha=0.3)
+
+    # Add arrows to show workflow
+    if has_magnetogram:
+        con1 = ConnectionPatch(
+            xyA=(0.5, 0), xyB=(0.5, 1),
+            coordsA="axes fraction", coordsB="axes fraction",
+            axesA=ax1, axesB=ax4, arrowstyle="->"
+        )
+        fig.add_artist(con1)
+
+        con2 = ConnectionPatch(
+            xyA=(0.5, 0), xyB=(0.5, 1),
+            coordsA="axes fraction", coordsB="axes fraction",
+            axesA=ax4, axesB=ax7, arrowstyle="->"
+        )
+        fig.add_artist(con2)
+
+    if has_aia and 'raw_aia' in locals():
+        con3 = ConnectionPatch(
+            xyA=(0.5, 0), xyB=(0.5, 1),
+            coordsA="axes fraction", coordsB="axes fraction",
+            axesA=ax2, axesB=ax5, arrowstyle="->"
+        )
+        fig.add_artist(con3)
+
+        con4 = ConnectionPatch(
+            xyA=(0.5, 0), xyB=(0.5, 1),
+            coordsA="axes fraction", coordsB="axes fraction",
+            axesA=ax5, axesB=ax8, arrowstyle="->"
+        )
+        fig.add_artist(con4)
+
+    if has_goes:
+        con5 = ConnectionPatch(
+            xyA=(0.5, 0), xyB=(0.5, 1),
+            coordsA="axes fraction", coordsB="axes fraction",
+            axesA=ax3, axesB=ax6, arrowstyle="->"
+        )
+        fig.add_artist(con5)
+
+        con6 = ConnectionPatch(
+            xyA=(0.5, 0), xyB=(0.5, 1),
+            coordsA="axes fraction", coordsB="axes fraction",
+            axesA=ax6, axesB=ax9, arrowstyle="->"
+        )
+        fig.add_artist(con6)
+
+    # Add arrow from features to prediction
+    if has_magnetogram and has_goes:
+        con7 = ConnectionPatch(
+            xyA=(1, 0.5), xyB=(0, 0.5),
+            coordsA="axes fraction", coordsB="axes fraction",
+            axesA=ax7, axesB=ax9, arrowstyle="->", connectionstyle="arc3,rad=0.3"
+        )
+        fig.add_artist(con7)
+
+    if has_aia and 'raw_aia' in locals() and has_goes:
+        con8 = ConnectionPatch(
+            xyA=(1, 0.5), xyB=(0, 0.5),
+            coordsA="axes fraction", coordsB="axes fraction",
+            axesA=ax8, axesB=ax9, arrowstyle="->", connectionstyle="arc3,rad=0.3"
+        )
+        fig.add_artist(con8)
+
+    # Add summary text
+    plt.figtext(0.5, 0.01,
+                "This visualization shows the data preprocessing and feature extraction workflow:\n" +
+                "1. Raw data collection → 2. Cleaning and calibration → 3. Feature extraction and prediction",
+                ha="center", fontsize=12, bbox={"facecolor": "lightgray", "alpha": 0.5, "pad": 5})
+
+    plt.tight_layout(rect=[0, 0.03, 1, 0.97])
+    plt.suptitle("Data Preprocessing Workflow for Solar Flare Prediction", fontsize=16, y=0.98)
+
+    # Save the figure
+    plt.savefig(os.path.join(output_dir, filename), dpi=300, bbox_inches='tight')
+    print(f"Saved {filename}")
+
+    return fig
+
+
+# Create feature importance visualization
+def create_feature_importance(data, filename="feature_importance.png"):
+    """
+    Create a visualization of feature importance for flare prediction
+
+    Parameters:
+    data (dict): Dictionary containing loaded data
+    filename (str): Output filename
+
+    Returns:
+    matplotlib.figure.Figure: The created figure
+    """
+    print("Creating feature importance visualization...")
+    fig = plt.figure(figsize=(14, 10))
+
+    # Check if we have the necessary data
+    has_features = ('magnetogram_features' in data and len(data['magnetogram_features']) > 0 and
+                    'has_flare' in data['magnetogram_features'].columns)
+
+    if not has_features:
+        # Create synthetic feature importance if real data not available
+        print("No feature data available, creating synthetic example...")
+
+        # Define feature categories and their importances
+        feature_categories = {
+            'Magnetic Field Topology': [
+                ('Magnetic Gradient', 0.85),
+                ('Schrijver R-value', 0.78),
+                ('Polarity Inversion Line Length', 0.76),
+                ('Fractal Dimension', 0.67),
+                ('Magnetic Flux', 0.62)
+            ],
+            'Magnetic Field Evolution': [
+                ('Helicity Injection Rate', 0.89),
+                ('Flux Emergence Rate', 0.81),
+                ('Lorentz Force', 0.71),
+                ('Magnetic Shear', 0.69),
+                ('Field Twist Parameter', 0.59)
+            ],
+            'Coronal Features': [
+                ('AIA 94Å Brightness', 0.76),
+                ('AIA 131Å Brightness', 0.74),
+                ('Coronal Loop Complexity', 0.68),
+                ('AIA 171Å Brightness', 0.54),
+                ('Coronal Dimming', 0.51)
+            ],
+            'Temporal Features': [
+                ('Time Since Last Flare', 0.72),
+                ('Flaring History (24h)', 0.69),
+                ('Sunspot Growth Rate', 0.62),
+                ('Active Region Age', 0.58),
+                ('Rotation Rate', 0.52)
+            ]
+        }
+
+        # Create a single list of all features sorted by importance
+        all_features = []
+        for category, features in feature_categories.items():
+            for feature_name, importance in features:
+                all_features.append((category, feature_name, importance))
+
+        # Sort by importance
+        all_features.sort(key=lambda x: x[2], reverse=True)
+
+        # Create a color map for categories
+        categories = list(feature_categories.keys())
+        colors = plt.cm.tab10(np.linspace(0, 1, len(categories)))
+        category_colors = dict(zip(categories, colors))
+
+        # 1. Top panel: Overall feature importance bar chart
+        ax1 = plt.subplot(2, 2, 1)
+
+        # Extract top 15 features
+        top_features = all_features[:15]
+
+        # Create bar chart
+        bar_positions = np.arange(len(top_features))
+        bars = ax1.barh(
+            bar_positions,
+            [feat[2] for feat in top_features],
+            color=[category_colors[feat[0]] for feat in top_features],
+            height=0.6
         )
 
-    thresholds = {
-        'A': 1e-8,
-        'B': 1e-7,
-        'C': 1e-6,
-        'M': 1e-5,
-        'X': 1e-4
-    }
+        # Add feature names and categories
+        for i, (category, name, _) in enumerate(top_features):
+            ax1.text(0.01, i, name, va='center', fontsize=9)
 
-    for flare_class, threshold in thresholds.items():
-        ax1.axhline(y=threshold, color='gray', linestyle=':', alpha=0.7)
-        ax1.text(recent_flux['timestamp'].min(), threshold * 1.1,
-                 flare_class, fontsize=12, color='white')
+        # Add legend for categories
+        legend_handles = [plt.Rectangle((0, 0), 1, 1, color=category_colors[cat]) for cat in categories]
+        ax1.legend(legend_handles, categories, loc='lower right', fontsize=8)
 
-    ax1.set_yscale('log')
-    ax1.set_ylabel('X-ray Flux (W/m²)', fontsize=14, color='white')
-    ax2.set_ylabel('Flare Probability', fontsize=14, color='red')
-    ax1.set_ylim(1e-9, 1e-3)
-    ax2.set_ylim(0, 1)
+        ax1.set_yticks(bar_positions)
+        ax1.set_yticklabels([])
+        ax1.set_xlim(0, 1)
+        ax1.set_xlabel('Relative Importance')
+        ax1.set_title('Top 15 Features by Importance')
+        ax1.invert_yaxis()  # Most important at the top
 
-    ax1.set_xlabel('Time (UTC)', fontsize=14)
-    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
-    plt.xticks(rotation=45)
+        # 2. Second panel: Feature importance by category
+        ax2 = plt.subplot(2, 2, 2)
 
-    lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
+        # Calculate average importance by category
+        category_avg = {}
+        for category in categories:
+            importances = [imp for cat, _, imp in all_features if cat == category]
+            category_avg[category] = np.mean(importances)
 
-    unique_labels = []
-    unique_lines = []
-    seen_labels = set()
+        # Sort categories by importance
+        sorted_categories = sorted(category_avg.items(), key=lambda x: x[1], reverse=True)
 
-    for line, label in zip(lines1 + lines2, labels1 + labels2):
-        if label not in seen_labels:
-            seen_labels.add(label)
-            unique_lines.append(line)
-            unique_labels.append(label)
+        # Create bar chart
+        bar_positions = np.arange(len(sorted_categories))
+        bars = ax2.barh(
+            bar_positions,
+            [avg for _, avg in sorted_categories],
+            color=[category_colors[cat] for cat, _ in sorted_categories],
+            height=0.5
+        )
 
-    ax1.legend(unique_lines, unique_labels, loc='upper left', fontsize=12)
+        # Add category names
+        for i, (category, _) in enumerate(sorted_categories):
+            ax2.text(0.01, i, category, va='center', fontsize=10)
 
-    plt.title('GOES X-ray Flux and Flare Prediction', fontsize=18, pad=20)
-    plt.grid(True, alpha=0.3)
+        ax2.set_yticks(bar_positions)
+        ax2.set_yticklabels([])
+        ax2.set_xlim(0, 1)
+        ax2.set_xlabel('Average Importance')
+        ax2.set_title('Feature Importance by Category')
 
-    now = recent_flux['timestamp'].max()
-    ax1.axvline(x=now, color='white', linestyle='-', linewidth=2)
-    ax1.text(now, 1e-8, 'Now', fontsize=12, color='white',
-             horizontalalignment='right')
+        # 3. Third panel: Feature importance distribution
+        ax3 = plt.subplot(2, 2, 3)
 
-    prediction_end = now + datetime.timedelta(days=2)
-    ax1.axvspan(now, prediction_end, alpha=0.2, color='gray')
+        # Extract all importances
+        all_importances = [imp for _, _, imp in all_features]
 
-    plt.tight_layout()
+        # Create histograms by category
+        for category in categories:
+            category_importances = [imp for cat, _, imp in all_features if cat == category]
+            ax3.hist(category_importances, alpha=0.7, bins=np.linspace(0, 1, 11),
+                     label=category, color=category_colors[category])
+
+        ax3.set_xlabel('Importance Score')
+        ax3.set_ylabel('Number of Features')
+        ax3.set_title('Distribution of Feature Importance')
+        ax3.legend(fontsize=8)
+
+        # 4. Fourth panel: Feature correlation heatmap
+        ax4 = plt.subplot(2, 2, 4)
+
+        # Create a synthetic correlation matrix for the top features
+        top_feature_names = [feat[1] for feat in top_features[:10]]
+
+        # Create a semi-realistic correlation matrix
+        np.random.seed(42)  # For reproducibility
+        corr_matrix = np.eye(len(top_feature_names))
+
+        # Add some correlations based on categories
+        for i, (cat_i, name_i, _) in enumerate(top_features[:10]):
+            for j, (cat_j, name_j, _) in enumerate(top_features[:10]):
+                if i != j:
+                    # Features in same category have higher correlation
+                    if cat_i == cat_j:
+                        corr_matrix[i, j] = 0.4 + 0.4 * np.random.random()
+                    else:
+                        corr_matrix[i, j] = 0.3 * np.random.random()
+
+        # Make sure the matrix is symmetric
+        corr_matrix = (corr_matrix + corr_matrix.T) / 2
+        np.fill_diagonal(corr_matrix, 1.0)
+
+        # Plot heatmap
+        im = ax4.imshow(corr_matrix, cmap='coolwarm', vmin=-1, vmax=1)
+
+        # Add feature names
+        short_names = [name.split(' ')[0] + ' ' + name.split(' ')[1][:3] + '.'
+                       if len(name.split(' ')) > 1 else name
+                       for name in top_feature_names]
+
+        ax4.set_xticks(np.arange(len(short_names)))
+        ax4.set_yticks(np.arange(len(short_names)))
+        ax4.set_xticklabels(short_names, rotation=45, ha='right', fontsize=8)
+        ax4.set_yticklabels(short_names, fontsize=8)
+
+        # Add colorbar
+        plt.colorbar(im, ax=ax4, label='Correlation')
+
+        ax4.set_title('Feature Correlation Matrix')
+    else:
+        # Use real data if available
+        features_df = data['magnetogram_features']
+
+        # Get numerical columns, excluding certain metadata columns
+        exclude_cols = ['timestamp', 'has_flare', 'next_flare_class', 'next_flare_time']
+        feature_cols = [col for col in features_df.select_dtypes(include=[np.number]).columns
+                        if col not in exclude_cols]
+
+        if len(feature_cols) > 0 and 'has_flare' in features_df.columns:
+            # Calculate feature importance using a simple correlation with has_flare
+            importances = {}
+            for col in feature_cols:
+                try:
+                    # Use absolute correlation as importance
+                    importances[col] = abs(features_df[col].corr(features_df['has_flare']))
+                except:
+                    importances[col] = 0.0
+
+            # Sort features by importance
+            sorted_features = sorted(importances.items(), key=lambda x: x[1], reverse=True)
+
+            # 1. Top panel: Overall feature importance bar chart
+            ax1 = plt.subplot(2, 2, 1)
+
+            # Extract top 15 features (or all if fewer than 15)
+            top_n = min(15, len(sorted_features))
+            top_features = sorted_features[:top_n]
+
+            # Create bar chart
+            bar_positions = np.arange(len(top_features))
+            bars = ax1.barh(
+                bar_positions,
+                [imp for _, imp in top_features],
+                color=plt.cm.viridis(np.linspace(0, 0.8, len(top_features))),
+                height=0.6
+            )
+
+            # Add feature names
+            for i, (name, _) in enumerate(top_features):
+                # Shorten long feature names
+                short_name = name.replace('_', ' ')
+                if len(short_name) > 20:
+                    short_name = short_name[:18] + '...'
+                ax1.text(0.01, i, short_name, va='center', fontsize=9)
+
+            ax1.set_yticks(bar_positions)
+            ax1.set_yticklabels([])
+            ax1.set_xlim(0, max([imp for _, imp in top_features]) * 1.1)
+            ax1.set_xlabel('Absolute Correlation with Flare Occurrence')
+            ax1.set_title('Top Feature Importance')
+            ax1.invert_yaxis()  # Most important at the top
+
+            # 2. Second panel: Feature distribution comparison
+            ax2 = plt.subplot(2, 2, 2)
+
+            # Select the top 2 features for comparison
+            if len(top_features) >= 2:
+                feature1, feature2 = top_features[0][0], top_features[1][0]
+
+                # Create scatter plot
+                flare_mask = features_df['has_flare'] == 1
+                no_flare_mask = features_df['has_flare'] == 0
+
+                # Use a subset if too many points
+                max_points = 1000
+                if sum(flare_mask) > max_points or sum(no_flare_mask) > max_points:
+                    # Sample points
+                    flare_indices = np.random.choice(
+                        np.where(flare_mask)[0],
+                        min(max_points, sum(flare_mask)),
+                        replace=False
+                    )
+                    no_flare_indices = np.random.choice(
+                        np.where(no_flare_mask)[0],
+                        min(max_points, sum(no_flare_mask)),
+                        replace=False
+                    )
+
+                    # Create new masks
+                    plot_mask = np.zeros(len(features_df), dtype=bool)
+                    plot_mask[flare_indices] = True
+                    plot_mask[no_flare_indices] = True
+
+                    # Apply the mask
+                    plot_df = features_df[plot_mask].copy()
+                else:
+                    plot_df = features_df.copy()
+
+                # Create scatter plot
+                ax2.scatter(
+                    plot_df[plot_df['has_flare'] == 0][feature1],
+                    plot_df[plot_df['has_flare'] == 0][feature2],
+                    alpha=0.5, s=20, label='No Flare', color='blue'
+                )
+                ax2.scatter(
+                    plot_df[plot_df['has_flare'] == 1][feature1],
+                    plot_df[plot_df['has_flare'] == 1][feature2],
+                    alpha=0.7, s=30, label='Flare', color='red'
+                )
+
+                # Format feature names for display
+                feature1_name = feature1.replace('_', ' ').title()
+                feature2_name = feature2.replace('_', ' ').title()
+                if len(feature1_name) > 25:
+                    feature1_name = feature1_name[:23] + '...'
+                if len(feature2_name) > 25:
+                    feature2_name = feature2_name[:23] + '...'
+
+                ax2.set_xlabel(feature1_name)
+                ax2.set_ylabel(feature2_name)
+                ax2.set_title('Top 2 Features Comparison')
+                ax2.legend()
+
+                # Check if log scale would be better
+                if (plot_df[feature1].max() / plot_df[feature1].min() > 100 and
+                        plot_df[feature1].min() > 0):
+                    ax2.set_xscale('log')
+                if (plot_df[feature2].max() / plot_df[feature2].min() > 100 and
+                        plot_df[feature2].min() > 0):
+                    ax2.set_yscale('log')
+            else:
+                ax2.text(0.5, 0.5, "Not enough features for comparison",
+                         ha='center', va='center', transform=ax2.transAxes)
+
+            # 3. Third panel: Feature distributions (box plots)
+            ax3 = plt.subplot(2, 2, 3)
+
+            # Select top 5 features for comparison
+            top_5 = min(5, len(top_features))
+            top5_features = [feat[0] for feat in top_features[:top_5]]
+
+            # Prepare data for box plots
+            boxplot_data = []
+            for feature in top5_features:
+                # Get data for flare and no-flare cases
+                flare_values = features_df[features_df['has_flare'] == 1][feature].values
+                no_flare_values = features_df[features_df['has_flare'] == 0][feature].values
+
+                # Normalize to make features comparable
+                all_values = np.concatenate([flare_values, no_flare_values])
+                min_val, max_val = np.nanmin(all_values), np.nanmax(all_values)
+
+                if max_val > min_val:
+                    norm_flare = (flare_values - min_val) / (max_val - min_val)
+                    norm_no_flare = (no_flare_values - min_val) / (max_val - min_val)
+
+                    boxplot_data.append(norm_no_flare)
+                    boxplot_data.append(norm_flare)
+                else:
+                    # Skip features with no variation
+                    continue
+
+            if boxplot_data:
+                # Create the box plot
+                box_positions = np.arange(len(boxplot_data))
+                bplot = ax3.boxplot(
+                    boxplot_data,
+                    positions=box_positions,
+                    patch_artist=True,
+                    widths=0.4
+                )
+
+                # Color the boxes
+                for i, box in enumerate(bplot['boxes']):
+                    if i % 2 == 0:  # No flare
+                        box.set(facecolor='blue', alpha=0.5)
+                    else:  # Flare
+                        box.set(facecolor='red', alpha=0.5)
+
+                # Set x-tick labels
+                ax3.set_xticks(box_positions[::2] + 0.5)  # Position between pairs
+
+                # Shorten feature names
+                short_names = []
+                for feature in top5_features:
+                    name = feature.replace('_', ' ').title()
+                    if len(name) > 15:
+                        name = name[:13] + '...'
+                    short_names.append(name)
+
+                ax3.set_xticklabels(short_names, rotation=45, ha='right')
+
+                # Add a legend for colors
+                ax3.plot([], [], 'bs', alpha=0.5, label='No Flare')
+                ax3.plot([], [], 'rs', alpha=0.5, label='Flare')
+                ax3.legend(loc='upper right', fontsize=8)
+            else:
+                ax3.text(0.5, 0.5, "Not enough variable features for comparison",
+                         ha='center', va='center', transform=ax3.transAxes)
+
+            ax3.set_ylabel('Normalized Feature Value')
+            ax3.set_title('Feature Distributions by Flare Occurrence')
+
+            # 4. Fourth panel: Feature correlation heatmap
+            ax4 = plt.subplot(2, 2, 4)
+
+            # Calculate correlation between top features
+            top_n = min(10, len(sorted_features))
+            top_cols = [feat[0] for feat in sorted_features[:top_n]]
+
+            try:
+                corr_matrix = features_df[top_cols].corr()
+
+                # Plot heatmap
+                im = ax4.imshow(corr_matrix, cmap='coolwarm', vmin=-1, vmax=1)
+
+                # Add feature names
+                ax4.set_xticks(np.arange(len(top_cols)))
+                ax4.set_yticks(np.arange(len(top_cols)))
+
+                # Shorten feature names
+                short_names = []
+                for feature in top_cols:
+                    name_parts = feature.split('_')
+                    if len(name_parts) > 1:
+                        # Use first word and initial of second word
+                        short_name = name_parts[0]
+                        if len(name_parts) > 1:
+                            short_name += '_' + ''.join([p[0] for p in name_parts[1:]])
+                    else:
+                        short_name = feature
+                    short_names.append(short_name)
+
+                ax4.set_xticklabels(short_names, rotation=45, ha='right', fontsize=8)
+                ax4.set_yticklabels(short_names, fontsize=8)
+
+                # Add colorbar
+                plt.colorbar(im, ax=ax4, label='Correlation')
+
+                ax4.set_title('Feature Correlation Matrix')
+            except:
+                ax4.text(0.5, 0.5, "Could not calculate feature correlations",
+                         ha='center', va='center', transform=ax4.transAxes)
+        else:
+            fig.text(0.5, 0.5, "Insufficient feature data for analysis",
+                     ha='center', va='center', fontsize=14)
+
+    # Add summary text
+    plt.figtext(0.5, 0.01, "This visualization shows feature importance for solar flare prediction:\n" +
+                "Top: Most predictive features | Middle: Category averages and distributions | " +
+                "Bottom: Feature correlations and relationships",
+                ha="center", fontsize=12, bbox={"facecolor": "lightgray", "alpha": 0.5, "pad": 5})
+    plt.tight_layout(rect=[0, 0.03, 1, 0.97])
+    plt.suptitle("Feature Importance Analysis for Solar Flare Prediction", fontsize=16, y=0.98)
+
+    # Save the figure
+    plt.savefig(os.path.join(output_dir, filename), dpi=300, bbox_inches='tight')
+    print(f"Saved {filename}")
 
     return fig
 
 
-# 5. TOPOLOGICAL MAGNETIC FIELD VISUALIZATION
-def create_topology_viz():
-    magnetogram = load_sample_magnetogram()
-
-    fig = plt.figure(figsize=(15, 10))
-    gs = fig.add_gridspec(1, 2, width_ratios=[1.5, 1])
-    ax1 = fig.add_subplot(gs[0, 0])
-    ax2 = fig.add_subplot(gs[0, 1])
-
-    im = ax1.imshow(magnetogram, cmap='seismic',
-                    norm=SymLogNorm(linthresh=10, vmin=-500, vmax=500))
-    plt.colorbar(im, ax=ax1, label='Magnetic Field (Gauss)')
-
-    mag_smooth = gaussian_filter(magnetogram, sigma=5)
-    contours = measure.find_contours(mag_smooth, 0)
-
-    for contour in contours:
-        ax1.plot(contour[:, 1], contour[:, 0], 'lime', linewidth=2)
-
-    pos_thresh = 100
-    neg_thresh = -100
-
-    pos_regions = (magnetogram > pos_thresh)
-    neg_regions = (magnetogram < neg_thresh)
-
-    pos_labels = measure.label(pos_regions)
-    neg_labels = measure.label(neg_regions)
-
-    pos_regions_props = measure.regionprops(pos_labels)
-    neg_regions_props = measure.regionprops(neg_labels)
-
-    G = nx.Graph()
-
-    pos_nodes = []
-    for i, region in enumerate(pos_regions_props):
-        if region.area > 50:
-            node_id = f"P{i + 1}"
-            G.add_node(node_id,
-                       pos=(region.centroid[1], region.centroid[0]),
-                       polarity=1,
-                       size=region.area)
-            pos_nodes.append((node_id, region))
-
-    neg_nodes = []
-    for i, region in enumerate(neg_regions_props):
-        if region.area > 50:
-            node_id = f"N{i + 1}"
-            G.add_node(node_id,
-                       pos=(region.centroid[1], region.centroid[0]),
-                       polarity=-1,
-                       size=region.area)
-            neg_nodes.append((node_id, region))
-
-    for pos_node, pos_region in pos_nodes:
-        for neg_node, neg_region in neg_nodes:
-            pos_y, pos_x = pos_region.centroid
-            neg_y, neg_x = neg_region.centroid
-            distance = np.sqrt((pos_x - neg_x) ** 2 + (pos_y - neg_y) ** 2)
-
-            if distance < 200:
-                weight = (pos_region.area * neg_region.area) / (distance ** 2) / 1e6
-                G.add_edge(pos_node, neg_node, weight=weight, distance=distance)
-
-    pos = nx.get_node_attributes(G, 'pos')
-    node_polarity = nx.get_node_attributes(G, 'polarity')
-    node_size = nx.get_node_attributes(G, 'size')
-
-    for node in G.nodes():
-        G.nodes[node]['viz_size'] = np.sqrt(node_size[node]) * 0.5
-
-    node_viz_sizes = [G.nodes[node]['viz_size'] for node in G.nodes()]
-    node_colors = ['red' if node_polarity[node] > 0 else 'blue' for node in G.nodes()]
-    edge_weights = [G[u][v]['weight'] * 5 for u, v in G.edges()]
-
-    nx.draw_networkx(
-        G,
-        pos=pos,
-        with_labels=True,
-        node_color=node_colors,
-        node_size=node_viz_sizes,
-        font_color='white',
-        width=edge_weights,
-        ax=ax2,
-        edge_color='yellow',
-        alpha=0.8
-    )
-
-    ax1.set_title('Magnetogram with Polarity Inversion Lines', fontsize=16)
-    ax2.set_title('Magnetic Connectivity Graph', fontsize=16)
-    ax2.set_axis_off()
-
-    if contours:
-        longest_contour = max(contours, key=len)
-        x_mid = np.mean(longest_contour[:, 1])
-        y_mid = np.mean(longest_contour[:, 0])
-        ax1.annotate('Major PIL', xy=(x_mid, y_mid), xytext=(x_mid + 50, y_mid - 50),
-                     arrowprops=dict(facecolor='white', shrink=0.05),
-                     color='white', fontsize=12)
-
-    if pos_regions_props:
-        strongest_pos = max(pos_regions_props, key=lambda r: np.sum(magnetogram * (pos_labels == r.label)))
-        ax1.annotate('+ Polarity', xy=(strongest_pos.centroid[1], strongest_pos.centroid[0]),
-                     xytext=(strongest_pos.centroid[1] + 40, strongest_pos.centroid[0] - 40),
-                     arrowprops=dict(facecolor='red', shrink=0.05),
-                     color='white', fontsize=12)
-
-    if neg_regions_props:
-        strongest_neg = max(neg_regions_props, key=lambda r: np.abs(np.sum(magnetogram * (neg_labels == r.label))))
-        ax1.annotate('- Polarity', xy=(strongest_neg.centroid[1], strongest_neg.centroid[0]),
-                     xytext=(strongest_neg.centroid[1] - 40, strongest_neg.centroid[0] + 40),
-                     arrowprops=dict(facecolor='blue', shrink=0.05),
-                     color='white', fontsize=12)
-
-    if G.edges():
-        strongest_edge = max(G.edges(data=True), key=lambda e: e[2]['weight'])
-        src, dst, _ = strongest_edge
-        ax2.annotate('Strongest\nConnection',
-                     xy=((pos[src][0] + pos[dst][0]) / 2, (pos[src][1] + pos[dst][1]) / 2),
-                     xytext=((pos[src][0] + pos[dst][0]) / 2 + 30, (pos[src][1] + pos[dst][1]) / 2 + 30),
-                     arrowprops=dict(facecolor='white', shrink=0.05),
-                     color='white', fontsize=12)
-
-    plt.suptitle("Magnetic Field Topology Analysis", fontsize=20, y=0.98)
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-
-    return fig
-
-
-# 6. MULTI-PARAMETER FLARE PREDICTION MODEL VISUALIZATION
-def create_model_visualization():
-    np.random.seed(42)
-    n_samples = 200
-
-    r_value = np.random.gamma(2, 2, n_samples)
-    free_energy = r_value * 2 + np.random.normal(0, 1, n_samples)
-    total_flux = r_value * 1.5 + free_energy * 0.5 + np.random.normal(0, 2, n_samples)
-
-    r_value = (r_value - r_value.min()) / (r_value.max() - r_value.min())
-    free_energy = (free_energy - free_energy.min()) / (free_energy.max() - free_energy.min())
-    total_flux = (total_flux - total_flux.min()) / (total_flux.max() - total_flux.min())
-
-    X = np.column_stack([r_value, free_energy, total_flux])
-
-    proba = 1 / (1 + np.exp(-(-1.5 + 3 * r_value + 4 * free_energy + 2 * total_flux)))
-    proba += np.random.normal(0, 0.05, n_samples)
-    proba = np.clip(proba, 0, 1)
-
-    fig = plt.figure(figsize=(18, 10))
-    gs = fig.add_gridspec(2, 3)
-    ax1 = fig.add_subplot(gs[:, 0:2], projection='3d')
-
-    grid_size = 20
-    r_grid = np.linspace(0, 1, grid_size)
-    f_grid = np.linspace(0, 1, grid_size)
-    r_grid, f_grid = np.meshgrid(r_grid, f_grid)
-
-    z_grid = np.zeros((grid_size, grid_size))
-    for i in range(grid_size):
-        for j in range(grid_size):
-            z_grid[i, j] = 1 / (1 + np.exp(-(-1.5 + 3 * r_grid[i, j] + 4 * f_grid[i, j] + 2 * 0.5)))
-
-    surf = ax1.plot_surface(r_grid, f_grid, z_grid, cmap='viridis',
-                            linewidth=0, antialiased=True, alpha=0.7)
-
-    cset = ax1.contourf(r_grid, f_grid, z_grid, zdir='z', offset=0,
-                        cmap='viridis', alpha=0.5)
-
-    scatter = ax1.scatter(r_value, free_energy, proba,
-                          c=proba, cmap='plasma', s=50, alpha=0.8)
-
-    ax1.set_xlabel('R-value (normalized)', fontsize=12)
-    ax1.set_ylabel('Free Energy (normalized)', fontsize=12)
-    ax1.set_zlabel('Flare Probability', fontsize=12)
-    ax1.set_title('3D Flare Prediction Model Visualization', fontsize=16)
-
-    cbar = plt.colorbar(scatter, ax=ax1, pad=0.1)
-    cbar.set_label('Flare Probability', fontsize=12)
-
-    xx, yy = np.meshgrid(np.linspace(0, 1, 10), np.linspace(0, 1, 10))
-    z = np.ones((10, 10)) * 0.5
-    ax1.plot_surface(xx, yy, z, color='red', alpha=0.2)
-
-    ax2 = fig.add_subplot(gs[0, 2])
-    feature_names = ['r_value', 'ising_energy', 'total_unsigned_flux']
-    feature_importance = [0.35, 0.40, 0.25]
-
-    bars = ax2.barh(feature_names, feature_importance, color='teal')
-    ax2.set_xlim(0, 0.5)
-    ax2.set_title('Feature Importance', fontsize=14)
-    ax2.set_xlabel('Importance Score', fontsize=12)
-
-    ax3 = fig.add_subplot(gs[1, 2])
-    metrics = {
-        'Accuracy': 0.85,
-        'Precision': 0.78,
-        'Recall': 0.82,
-        'F1 Score': 0.80,
-        'TSS': 0.72
-    }
-
-    bars = ax3.bar(metrics.keys(), metrics.values(), color='purple')
-    ax3.set_ylim(0, 1)
-    ax3.set_title('Model Performance Metrics', fontsize=14)
-    ax3.set_ylabel('Score', fontsize=12)
-    plt.xticks(rotation=45)
-
-    for bar in bars:
-        height = bar.get_height()
-        ax3.text(bar.get_x() + bar.get_width() / 2., height + 0.02,
-                 f'{height:.2f}', ha='center', va='bottom', fontsize=10)
-
-    plt.tight_layout()
-
-    return fig
-
-
-# 7. TIME EVOLUTION ANIMATION OF ACTIVE REGION
-def create_active_region_animation():
-    n_frames = 20
-    magnetograms = []
-    timestamps = []
-
-    np.random.seed(42)
-    base_mag = np.random.normal(0, 100, (256, 256))
-    base_mag = gaussian_filter(base_mag, sigma=10)
-
-    for x, y, strength, size in [
-        (80, 100, 500, 15),
-        (150, 120, -400, 12)
-    ]:
-        y_grid, x_grid = np.ogrid[-y:256 - y, -x:256 - x]
-        mask = x_grid * x_grid + y_grid * y_grid <= size * size
-        base_mag[mask] = strength
-
-    for i in range(n_frames):
-        timestamp = datetime.datetime.now() - datetime.timedelta(hours=(n_frames - i))
-        timestamps.append(timestamp)
-
-        emergence_factor = i / (n_frames - 1)
-        shear_factor = i / (n_frames - 1) * 0.2
-
-        evolved_mag = base_mag.copy()
-
-        if i > 0:
-            emerge_x = 130 + i * 2
-            emerge_y = 150 - i
-            emerge_size = 5 + i * 0.5
-            emerge_strength = 200 + i * 20
-
-            y_grid, x_grid = np.ogrid[-emerge_y:256 - emerge_y, -emerge_x:256 - emerge_x]
-            mask = x_grid * x_grid + y_grid * y_grid <= emerge_size * emerge_size
-            evolved_mag[mask] += emerge_strength * emergence_factor
-
-            emerge_x += 15
-            emerge_y += 10
-            y_grid, x_grid = np.ogrid[-emerge_y:256 - emerge_y, -emerge_x:256 - emerge_x]
-            mask = x_grid * x_grid + y_grid * y_grid <= emerge_size * emerge_size
-            evolved_mag[mask] -= emerge_strength * emergence_factor
-
-        if i > 0:
-            flow_x = np.zeros_like(evolved_mag)
-            flow_y = np.zeros_like(evolved_mag)
-
-            flow_x[evolved_mag > 100] = 1 * shear_factor
-            flow_x[evolved_mag < -100] = -1 * shear_factor
-
-            from scipy.ndimage import shift
-            evolved_mag = shift(evolved_mag, [0, shear_factor * i])
-
-        magnetograms.append(evolved_mag)
-
-    fig, ax = plt.subplots(figsize=(10, 10))
-    im = ax.imshow(magnetograms[0], cmap='seismic',
-                   norm=SymLogNorm(linthresh=10, vmin=-500, vmax=500))
-    title = ax.set_title(f"Active Region Evolution: {timestamps[0].strftime('%Y-%m-%d %H:%M')}")
-    plt.colorbar(im, label='Magnetic Field Strength (Gauss)')
-
-    def update(frame):
-        im.set_array(magnetograms[frame])
-        title.set_text(f"Active Region Evolution: {timestamps[frame].strftime('%Y-%m-%d %H:%M')}")
-        return im, title
-
-    ani = FuncAnimation(fig, update, frames=range(n_frames), blit=True)
-
-    return ani, fig
-
-
-# 8. COMBINED VISUALIZATION DASHBOARD
-def create_dashboard():
-    print("Solar Physics Data Visualization Dashboard would include:")
-    print("1. Interactive Flare Prediction Dashboard")
-    print("2. Multi-Wavelength AIA Visualization")
-    print("3. 3D Magnetogram Visualization")
-    print("4. GOES X-ray Flux and Flare Prediction")
-    print("5. Topological Magnetic Field Visualization")
-    print("6. Multi-Parameter Flare Prediction Model Visualization")
-    print("7. Time Evolution Animation of Active Region")
-
-    return "Dashboard components generated successfully"
-
-
-# MAIN FUNCTION
-def main():
-    # Create the folder if it doesn't exist
-    if not os.path.exists("advanced_visualisations"):
-        os.makedirs("advanced_visualisations")
-
-    # Generate and save visualizations
-    print("Generating visualizations...")
-
-    # 1. Interactive Flare Prediction Dashboard
-    fig1 = create_flare_prediction_dashboard()
-    fig1.write_html("advanced_visualisations/flare_prediction_dashboard.html")
-    fig1.write_image("advanced_visualisations/flare_prediction_dashboard.png")
-
-    # 2. Multi-Wavelength AIA Visualization
-    fig2 = create_multiwavelength_aia_viz()
-    fig2.savefig("advanced_visualisations/multi_wavelength_aia.png", dpi=300, bbox_inches="tight")
-
-    # 3. 3D Magnetogram Visualization
-    fig3 = create_3d_magnetogram_viz()
-    fig3.savefig("advanced_visualisations/3d_magnetogram.png", dpi=300, bbox_inches="tight")
-
-    # 4. GOES X-ray Flux and Flare Prediction
-    fig4 = create_xray_prediction_viz()
-    fig4.savefig("advanced_visualisations/goes_xray_flux.png", dpi=300, bbox_inches="tight")
-
-    # 5. Topological Magnetic Field Visualization
-    fig5 = create_topology_viz()
-    fig5.savefig("advanced_visualisations/topology_viz.png", dpi=300, bbox_inches="tight")
-
-    # 6. Multi-Parameter Flare Prediction Model Visualization
-    fig6 = create_model_visualization()
-    fig6.savefig("advanced_visualisations/model_visualization.png", dpi=300, bbox_inches="tight")
-
-    # 7. Time Evolution Animation of Active Region
-    ani, fig7 = create_active_region_animation()
-    ani.save("advanced_visualisations/active_region_animation.gif", writer="pillow", fps=2)
-    fig7.savefig("advanced_visualisations/active_region_last_frame.png", dpi=300, bbox_inches="tight")
-
-    print("All visualizations saved to the 'advanced_visualisations' folder.")
-
-
-# Run the main function
+# Main execution
 if __name__ == "__main__":
-    main()
+    # Load the data
+    data = load_data()
+
+    # Generate visualizations
+    create_data_overview(data)
+    create_preprocessing_workflow(data)
+    create_feature_importance(data)
+
+    print("\nAll visualizations created successfully! Check the 'advanced_visualizations2' directory.")

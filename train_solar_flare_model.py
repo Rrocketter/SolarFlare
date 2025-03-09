@@ -847,12 +847,12 @@ class SolarDataGenerator(tf.keras.utils.Sequence):
         unique_timestamps.sort()
 
         if len(unique_timestamps) < self.sequence_length + self.prediction_window:
-        raise ValueError(
-            f"Not enough timestamps ({len(unique_timestamps)}) for "
-            f"sequence_length ({self.sequence_length}) + prediction_window ({self.prediction_window})"
-        )
+            raise ValueError(
+                f"Not enough timestamps ({len(unique_timestamps)}) for "
+                f"sequence_length ({self.sequence_length}) + prediction_window ({self.prediction_window})"
+            )
 
-        for i in range(len(unique_timestamps) - self.sequence_length - self.prediction_windowm +1):
+        for i in range(len(unique_timestamps) - self.sequence_length - self.prediction_window +1):
             # Get sequence timestamps
             seq_timestamps = unique_timestamps[i:i + self.sequence_length]
             target_timestamp = unique_timestamps[i + self.sequence_length]
@@ -1299,7 +1299,7 @@ def train_and_evaluate_model(config=None):
                 'data_dir': './data/processed',
                 'batch_size': 8,
                 'sequence_length': 24,  # 12 hours at 30-min cadence
-                'prediction_window': 48,  # 24 hours
+                'prediction_window': 44,  # 24 hours
                 'learning_rate': 1e-4,
                 'epochs': 100,
                 'val_split': 0.15,
