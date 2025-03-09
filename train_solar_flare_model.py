@@ -350,6 +350,13 @@ class SolarFlarePredictor:
             reinterpreted_batch_ndims=1
         )
 
+        def make_prior_fn(kernel_size, bias_size, dtype=None):
+            n = kernel_size + bias_size
+            return tfd.Independent(
+                tfd.Normal(loc=tf.zeros(n, dtype=dtype),
+                           scale=1.0
+                           ), reinterpreted_batch_ndims=1)
+
         # Variational posterior with trainable parameters
         x = layers.Dense(128, activation='relu')(features)
         x = layers.Dropout(self.config['dropout_rate'])(x)
@@ -357,14 +364,11 @@ class SolarFlarePredictor:
         # Bayesian dense layer for classification uncertainty
         bayesian_output = tfpl.DenseVariational(
             units=tfpl.IndependentNormal.params_size(output_dims),
-            make_prior_fn=lambda *args, **kwargs: prior,
+            # make_prior_fn=lambda *args, **kwargs: prior,
+            make_prior_fn=make_prior_fn,
             # make_posterior_fn=tfpl.util.default_mean_field_normal_fn(),
             # make_posterior_fn=default_mean_field_normal_fn(),
-            make_posterior_fn=lambda dtype, shape, name, *args, **kwargs: default_mean_field_normal_fn()(dtype=dtype,
-                                                                                                         shape=shape,
-                                                                                                         name=name,
-                                                                                                         trainable=True,
-                                                                                                         add_variable_fn=tf.keras.backend.variable),
+            make_posterior_fn=tfpl.default_mean_field_normal_fn(trainable=True),
             kl_weight=1 / self.config['batch_size'],
             activation=None
         )(x)
