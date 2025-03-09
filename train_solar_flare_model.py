@@ -342,7 +342,11 @@ class SolarFlarePredictor:
         # Prior distribution for the Bayesian layers
         prior = tfd.Independent(
             # tfd.Normal(loc=tf.zeros(output_dims), scale=1),
-            tfd.Normal(loc=tf.zeros(output_dims)),
+            # tfd.Normal(loc=tf.zeros(output_dims)),
+            tfd.Normal(
+                loc=tf.zeros(output_dims),
+                scale=1.0  # Add scale parameter (default=1.0)
+            ),
             reinterpreted_batch_ndims=1
         )
 
