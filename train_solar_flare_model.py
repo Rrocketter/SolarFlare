@@ -368,7 +368,7 @@ class SolarFlarePredictor:
             make_prior_fn=make_prior_fn,
             # make_posterior_fn=tfpl.util.default_mean_field_normal_fn(),
             # make_posterior_fn=default_mean_field_normal_fn(),
-            make_posterior_fn=tfpl.default_mean_field_normal_fn(),
+            make_posterior_fn=tfpl.layers.default_mean_field_normal_fn(),
             kl_weight=1 / self.config['batch_size'],
             activation=None
         )(x)
