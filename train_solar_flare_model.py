@@ -230,7 +230,8 @@ class SolarFlarePredictor:
             x = layers.MaxPooling2D(pool_size=2)(x)
 
         x = layers.GlobalAveragePooling2D()(x)
-        x = layers.Dense(128, activation='relu')(x)
+        # x = layers.Dense(128, activation='relu')(x)
+        x = layers.Dense(256, activation='relu')(x)
 
         encoder = Model(
             inputs=inputs,
