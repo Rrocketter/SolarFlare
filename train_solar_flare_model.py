@@ -19,6 +19,7 @@ import logging
 import traceback
 from io import StringIO
 from typing import List
+from tensorflow_probability.python.layers import default_mean_field_normal_fn
 
 
 tfd = tfp.distributions
@@ -340,7 +341,8 @@ class SolarFlarePredictor:
         """Build Bayesian layers for uncertainty quantification"""
         # Prior distribution for the Bayesian layers
         prior = tfd.Independent(
-            tfd.Normal(loc=tf.zeros(output_dims), scale=1),
+            # tfd.Normal(loc=tf.zeros(output_dims), scale=1),
+            tfd.Normal(loc=tf.zeros(output_dims)),
             reinterpreted_batch_ndims=1
         )
 
@@ -352,7 +354,8 @@ class SolarFlarePredictor:
         bayesian_output = tfpl.DenseVariational(
             units=tfpl.IndependentNormal.params_size(output_dims),
             make_prior_fn=lambda *args, **kwargs: prior,
-            make_posterior_fn=tfpl.util.default_mean_field_normal_fn(),
+            # make_posterior_fn=tfpl.util.default_mean_field_normal_fn(),
+            make_posterior_fn=default_mean_field_normal_fn,
             kl_weight=1 / self.config['batch_size'],
             activation=None
         )(x)
