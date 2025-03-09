@@ -1283,6 +1283,25 @@ class EnhancedSolarExplainability:
 
         return original_pred - ablated_pred
 
+# Helper function to create TF datasets
+def create_tf_dataset(data_gen, indices, config):
+    return tf.data.Dataset.from_generator(
+        lambda: (data_gen._generate_data([data_gen.sequences[i] for i in batch])
+                for batch in np.array_split(indices, max(1, len(indices)//config['batch_size']))),
+        output_signature=(
+            (
+                tf.TensorSpec(shape=(None, config['sequence_length'], 1024, 1024, 1), dtype=tf.float32),
+                *[tf.TensorSpec(shape=(None, config['sequence_length'], 512, 512, 1), dtype=tf.float32)
+                  for _ in range(9)]
+            ),
+            (
+                tf.TensorSpec(shape=(None, 5), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
+                tf.TensorSpec(shape=(None, 1), dtype=tf.float32)
+            )
+        )
+    ).prefetch(tf.data.AUTOTUNE)
 
 # Training and Evaluation
 def train_and_evaluate_model(config=None):
@@ -1956,22 +1975,4 @@ def plot_attributions(case, filename):
     plt.close()
 
 
-# Helper function to create TF datasets
-def create_tf_dataset(data_gen, indices, config):
-    return tf.data.Dataset.from_generator(
-        lambda: (data_gen._generate_data([data_gen.sequences[i] for i in batch])
-                for batch in np.array_split(indices, max(1, len(indices)//config['batch_size']))),
-        output_signature=(
-            (
-                tf.TensorSpec(shape=(None, config['sequence_length'], 1024, 1024, 1), dtype=tf.float32),
-                *[tf.TensorSpec(shape=(None, config['sequence_length'], 512, 512, 1), dtype=tf.float32)
-                  for _ in range(9)]
-            ),
-            (
-                tf.TensorSpec(shape=(None, 5), dtype=tf.float32),
-                tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
-                tf.TensorSpec(shape=(None, 1), dtype=tf.float32),
-                tf.TensorSpec(shape=(None, 1), dtype=tf.float32)
-            )
-        )
-    ).prefetch(tf.data.AUTOTUNE)
+
