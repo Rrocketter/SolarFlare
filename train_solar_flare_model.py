@@ -364,7 +364,7 @@ class SolarFlarePredictor:
             loc_regularizer=None,
             untransformed_scale_regularizer=None,
             loc_constraint=None,
-            untransformed_scale_constraint=None
+            untransformed_scale_constraint = None
         )
 
         # Variational posterior with trainable parameters
