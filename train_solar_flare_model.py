@@ -358,8 +358,8 @@ class SolarFlarePredictor:
                            ), reinterpreted_batch_ndims=1)
 
         make_posterior_fn = tfp.layers.default_mean_field_normal_fn(
-            trainable=True,  # Explicitly added
-            add_variable_fn=tfp.layers.default_add_variable_fn,  # Explicitly added
+            trainable=True,
+            add_variable_fn=tf.keras.layers.Layer.add_weight,  # Use add_weight instead
             is_singular=False,
             loc_initializer=tf.random_normal_initializer(stddev=0.1),
             untransformed_scale_initializer=tf.random_normal_initializer(mean=-3.0, stddev=0.1),
