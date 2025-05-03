@@ -71,12 +71,12 @@ saved_models/
 
 ### 1. Training
 
-### RUN THIS COMMAND FOR TRAINING HENRY:
+
 ```bash
 CUDA_VISIBLE_DEVICES=0 python train_solar_flare_model.py
 ```
 
-### IGNORE THIS
+
 ```bash
 python train_solar_flare_model.py \
   --data_dir ./data/processed \
